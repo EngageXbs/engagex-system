@@ -686,6 +686,7 @@ EX.initAuth = async function(){
   EX.sb.auth.onAuthStateChange((_event, session)=>{
     EX.authEmail = (session && session.user && session.user.email) || null;
     EX.authReady = true;
+    EX.maybeAutoCompleteBootstrap();
     EX.scheduleRender();
   });
   try{
@@ -693,6 +694,7 @@ EX.initAuth = async function(){
     EX.authEmail = (data && data.session && data.session.user && data.session.user.email) || null;
   }catch(e){ console.warn('getSession failed', e); }
   EX.authReady = true;
+  EX.maybeAutoCompleteBootstrap();
   EX.scheduleRender();
 };
 // Finds the employee record matching EX.authEmail (if any) and makes it the
@@ -708,6 +710,44 @@ EX.syncSessionFromAuth = function(){
     EX.session = {mode:'staff', employeeId:emp.id, portalClientId:null};
     EX.saveSessionLocal();
     EX.addAudit('Signed in', 'employees', emp.id, null, null);
+  }
+};
+// ---- Finishing first-time bootstrap after a deferred/confirmed signup ----
+// EX.submitBootstrap (below) can't always create the first employee record
+// right when the "Create workspace" form is submitted: if the Supabase
+// project requires email confirmation, signUp() returns no active session yet,
+// and Row Level Security correctly refuses an unauthenticated write — trying
+// to write anyway would throw. So bootstrap only writes the employee record
+// once a real session actually exists; EX.PENDING_BOOTSTRAP_KEY remembers the
+// name they typed in the meantime, and this function finishes the job the
+// moment a real, matching Supabase Auth session shows up (confirmation click,
+// or a plain sign-in) for a workspace that still has zero employees.
+EX.PENDING_BOOTSTRAP_KEY = 'ex_pending_bootstrap_v1';
+EX.completeBootstrap = async function(email, name){
+  await EX.add('employees', {name: name || (email.split('@')[0]), email, role:'super_admin', department:'Leadership', status:'Active', employmentType:'Full-time', joiningDate:EX.now(), skills:[], managerId:null});
+  await EX.setConfig({name:'Engage X Business Solutions', createdAt:EX.now(), baseCurrency:'INR', countries:['India','UAE','Saudi Arabia','Kuwait'], reminderSchedule:[7,3,1,0,-1,-3,-7], bank:{}, qrAssetId:null, taxLabel:'GST', taxRate:18});
+  try{ localStorage.removeItem(EX.PENDING_BOOTSTRAP_KEY); }catch(e){}
+};
+EX._bootstrapCompleting = false;
+EX.maybeAutoCompleteBootstrap = async function(){
+  if(!EX.authEmail || !EX.dbReady) return;
+  if(EX.get('employees').length > 0) return; // not a fresh workspace — nothing to finish
+  if(EX._bootstrapCompleting) return;
+  EX._bootstrapCompleting = true;
+  try{
+    let pendingName = null;
+    try{
+      const raw = localStorage.getItem(EX.PENDING_BOOTSTRAP_KEY);
+      if(raw){
+        const p = JSON.parse(raw);
+        if(p && p.email && p.email.toLowerCase()===EX.authEmail.toLowerCase()) pendingName = p.name;
+      }
+    }catch(e){}
+    await EX.completeBootstrap(EX.authEmail, pendingName);
+  }catch(e){
+    console.warn('auto-complete bootstrap failed', e);
+  }finally{
+    EX._bootstrapCompleting = false;
   }
 };
 EX.signOut = function(){
@@ -768,6 +808,13 @@ EX.renderSignIn = function(){
     const email = EX.authEmail.toLowerCase();
     const matched = EX.get('employees').find(e=> (e.email||'').toLowerCase()===email);
     if(!matched){
+      if(emps.length===0){
+        // A brand-new workspace with a real signed-in session and no employees
+        // yet is mid auto-bootstrap-completion (EX.maybeAutoCompleteBootstrap) —
+        // not an error, just a moment of work in progress.
+        return `<div class="min-h-screen flex items-center justify-center"><div class="text-center">
+          ${EX.spinner()}<div class="mt-3 text-sm" style="color:var(--ex-ink-soft)">Finishing your workspace setup…</div></div></div>`;
+      }
       return `<div class="min-h-screen flex">${hero}<div class="flex-1 flex items-center justify-center p-6 sm:p-10"><div class="w-full max-w-lg">
         <div class="lg:hidden flex items-center gap-2 font-display font-bold text-xl mb-8">${EX.brandMark(false)}Engage X</div>
         <div class="ex-card p-6 text-center">
@@ -782,6 +829,12 @@ EX.renderSignIn = function(){
     // move past the sign-in screen entirely — nothing further to render here.
   }
   const hasEmployees = emps.length > 0;
+  // Recovery escape hatch: if a first "Create workspace" attempt got partway
+  // through (e.g. the Supabase account was created but confirming email /
+  // finishing setup was interrupted), trying to bootstrap again just fails
+  // with "already registered". Signing in with those same credentials instead
+  // reaches EX.maybeAutoCompleteBootstrap(), which finishes the job.
+  const showLogin = hasEmployees || EX.ui.showLoginInstead;
   const loginForm = `<div class="ex-card p-5">
     <div class="font-semibold text-sm mb-3">Sign in</div>
     <form onsubmit="EX.submitLogin(event)" class="space-y-3">
@@ -797,8 +850,9 @@ EX.renderSignIn = function(){
       <div class="w-full max-w-lg">
         <div class="lg:hidden flex items-center gap-2 font-display font-bold text-xl mb-8">${EX.brandMark(false)}Engage X</div>
         <h1 class="font-display text-2xl font-bold mb-1">Sign in to your workspace</h1>
-        <p class="text-sm mb-6" style="color:var(--ex-ink-soft)">${hasEmployees? 'Use the email and password your admin set up for you.' : 'No employees yet — set up your workspace below.'}</p>
-        ${hasEmployees ? loginForm : EX.renderBootstrap()}
+        <p class="text-sm mb-6" style="color:var(--ex-ink-soft)">${hasEmployees? 'Use the email and password your admin set up for you.' : (showLogin? 'Sign in with the email and password you already started creating.' : 'No employees yet — set up your workspace below.')}</p>
+        ${showLogin ? loginForm : EX.renderBootstrap()}
+        ${!hasEmployees ? `<div class="mt-3 text-center"><button onclick="EX.ui.showLoginInstead=!EX.ui.showLoginInstead;EX.scheduleRender()" class="text-xs underline" style="color:var(--ex-ink-soft)">${EX.ui.showLoginInstead? '← Back to creating the first account' : 'Already started creating an account? Sign in instead'}</button></div>` : ''}
         <div class="mt-8 text-xs leading-relaxed p-3 rounded-lg" style="background:var(--ex-blue-50);color:var(--ex-ink-soft)">
           ${EX.icon('info','w-3.5 h-3.5 inline -mt-0.5 mr-1')} Each teammate signs in with their own email and password (Supabase Auth). A Super Admin, Ops Head or HR teammate creates logins for others from an employee's profile page — see the README for how Row Level Security enforces this at the database level too.
         </div>
@@ -834,12 +888,21 @@ EX.submitBootstrap = async function(ev){
   }catch(e){
     EX.ui.bootstrapError = 'Could not create your login.'; EX.scheduleRender(); return;
   }
-  await EX.add('employees', {name, email, role:'super_admin', department:'Leadership', status:'Active', employmentType:'Full-time', joiningDate:EX.now(), skills:[], managerId:null});
-  await EX.setConfig({name:'Engage X Business Solutions', createdAt:EX.now(), baseCurrency:'INR', countries:['India','UAE','Saudi Arabia','Kuwait'], reminderSchedule:[7,3,1,0,-1,-3,-7], bank:{}, qrAssetId:null, taxLabel:'GST', taxRate:18});
-  if(!signUpData || !signUpData.session){
-    // Supabase project requires email confirmation — no session yet. The employee
-    // record above is already saved, so once they confirm and sign in normally,
-    // EX.syncSessionFromAuth() will match them straight to it.
+  // Remember the name they typed so EX.completeBootstrap() can use it once a
+  // real session exists — see below for why we can't necessarily write the
+  // employee record right this instant.
+  try{ localStorage.setItem(EX.PENDING_BOOTSTRAP_KEY, JSON.stringify({email, name})); }catch(e){}
+  if(signUpData && signUpData.session){
+    // We already have a real, active session (email confirmation is off, or
+    // wasn't required) — finish right away rather than waiting for the next
+    // auth-state event.
+    await EX.completeBootstrap(email, name);
+  }else{
+    // Supabase project requires email confirmation — there's no active session
+    // yet, so writing the employee record now would be rejected by Row Level
+    // Security (correctly — an unconfirmed signup isn't a real signed-in user
+    // yet). EX.maybeAutoCompleteBootstrap() finishes this the moment they
+    // confirm and a real session shows up.
     EX.ui.bootstrapNeedsConfirm = email;
   }
   EX.scheduleRender();
@@ -1188,6 +1251,7 @@ EX.render = function(){
   // Keep EX.session in sync with whoever is actually signed in to Supabase
   // Auth — this is what replaces the old "pick a profile" step with real login.
   if(EX.session.mode!=='portal') EX.syncSessionFromAuth();
+  EX.maybeAutoCompleteBootstrap();
   // Defense in depth: a 'staff'/'portal' session is only legitimate if there is
   // a live Supabase Auth session behind it. The locally-cached ex_os_session_v1
   // session (EX.session) can otherwise outlive the real Supabase session — e.g.
