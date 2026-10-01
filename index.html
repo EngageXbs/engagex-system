@@ -468,7 +468,20 @@ EX.initDb = async function(){
     EX.CAP.db = EX.makeSupabaseDb(EX.sb);
   }catch(e){ console.warn('Supabase init failed', e); EX.CAP.db = null; EX.sb = null; }
   if(!EX.CAP.db){ EX.dbOffline = true; EX.scheduleRender(); return; }
-  EX.initAuth();
+  // IMPORTANT: wait for the Supabase Auth session to finish loading/attaching to
+  // this client BEFORE subscribing to any table. supabase-js restores a
+  // persisted session asynchronously in the background after createClient(), and
+  // a request made before that finishes goes out as the anon role — which, under
+  // this app's Row Level Security (authenticated-only), silently comes back
+  // empty rather than erroring. That previously caused two real, confusing bugs:
+  // (1) a page refresh could see an empty employees list for a moment, decide
+  // the signed-in employee record was "missing", and sign the user straight back
+  // out; (2) a realtime channel subscribed before the session attached could
+  // miss postgres_changes events (e.g. a just-added employee not appearing until
+  // something else — like signing out and back in — re-established it). A 6s
+  // cap keeps a slow/unresponsive Supabase Auth check from blocking the whole
+  // app from loading at all.
+  await Promise.race([ EX.initAuth(), new Promise(resolve=>setTimeout(resolve, 6000)) ]);
   EX.COLLECTIONS.forEach(EX.watchCollection);
   // config singleton doc
   try{
