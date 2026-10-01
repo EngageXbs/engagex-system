@@ -1,0 +1,10 @@
+{
+  "functions": {
+    "api/ai.js": {
+      "maxDuration": 30
+    },
+    "api/create-user.js": {
+      "maxDuration": 15
+    }
+  }
+}

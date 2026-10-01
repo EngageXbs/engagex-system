@@ -1,0 +1,9 @@
+{
+  "name": "engagex-operating-system",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Engage X Business Solutions — self-hosted operating system (static frontend + Vercel serverless AI proxy, Supabase backend).",
+  "engines": {
+    "node": ">=18"
+  }
+}
