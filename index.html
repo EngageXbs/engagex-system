@@ -291,6 +291,25 @@ EX.CAP = {db:null, assets:null, sample:null, downloads:null};
 EX.data = {}; // collectionName -> array of {id,...fields}
 EX.dbReady = false;
 EX.dbOffline = false;
+// IMPORTANT: EX.dbReady flips true the moment the FIRST of the 23 collections
+// finishes its initial load — not specifically 'employees'. Supabase answers
+// each collection's query independently and in no guaranteed order, so on a
+// real deployment a different, faster table can easily finish before
+// 'employees' does. Code that needs to know "do we actually know the real
+// employees list yet" (login matching, and the one-time first-admin
+// bootstrap-completion below) must NOT use EX.dbReady for that — it must wait
+// on EX.employeesReady instead, which is only set once the employees
+// collection itself has delivered its first snapshot. Getting this wrong
+// previously caused a real bug: EX.get('employees') returns [] both when
+// there truly are zero employees AND when employees just hasn't loaded yet,
+// and EX.maybeAutoCompleteBootstrap() could not tell those apart — on a slow
+// or unlucky load order it would treat an existing workspace as brand new and
+// re-run first-time setup (inserting a duplicate super_admin employee and
+// resetting company config back to defaults) every time this happened,
+// and show a permanently stuck "Finishing your workspace setup…" screen
+// whenever it happened without the required pending-bootstrap data in
+// localStorage (e.g. a normal login, not a fresh signup) to complete.
+EX.employeesReady = false;
 
 EX.COLLECTIONS = ['config','employees','leads','proposals','clients','content','tasks','invoices','payments',
   'expenses','vendors','vendorInvoices','bankAccounts','attendance','leaveRequests','wfhRequests','meetings',
@@ -301,6 +320,7 @@ EX.watchCollection = function(name){
     EX.CAP.db.collection(name).onSnapshot((snap)=>{
       EX.data[name] = snap.docs.map(d=> Object.assign({id:d.id}, d.data()));
       EX.dbReady = true;
+      if(name==='employees') EX.employeesReady = true;
       EX.scheduleRender();
     }, (err)=>{ console.warn('snapshot error', name, err); });
   }catch(e){ console.warn('watch failed', name, e); }
@@ -347,9 +367,22 @@ EX.makeSupabaseDb = function(sb){
         };
       },
       onSnapshot(onNext, onError){
-        async function load(){
+        // A fresh page load fires a SELECT + a realtime subscribe for all 23
+        // collections at once; on a transient hiccup (cold Supabase project,
+        // brief network blip) one of those 23 can fail its very first load.
+        // Without a retry, that single collection would simply never reach
+        // "loaded" until the whole page is refreshed — which, for the
+        // 'employees' table specifically, is exactly what caused the "stuck
+        // on Finishing your workspace setup" symptom in production. Retrying
+        // a few times with backoff lets a transient failure recover on its
+        // own instead of requiring a manual reload.
+        async function load(attempt){
+          attempt = attempt || 0;
           const { data, error } = await sb.from(name).select('id,data,created_at,updated_at').order('created_at', { ascending: true });
-          if(error){ onError && onError(EX.mapSupabaseError(error)); return; }
+          if(error){
+            if(attempt < 4){ setTimeout(()=> load(attempt+1), 1000 * Math.pow(2, attempt)); return; }
+            onError && onError(EX.mapSupabaseError(error)); return;
+          }
           onNext({ docs: (data||[]).map(r => ({ id: r.id, data: () => Object.assign({}, r.data, {
             _createdAt: r.created_at ? new Date(r.created_at).getTime() : undefined,
             _updatedAt: r.updated_at ? new Date(r.updated_at).getTime() : undefined,
@@ -716,7 +749,7 @@ EX.initAuth = async function(){
 // either the auth session or the employees list becomes available (whichever
 // arrives second).
 EX.syncSessionFromAuth = function(){
-  if(!EX.authEmail || !EX.dbReady) return;
+  if(!EX.authEmail || !EX.employeesReady) return;
   const email = EX.authEmail.toLowerCase();
   const emp = EX.get('employees').find(e=> (e.email||'').toLowerCase()===email);
   if(emp && (EX.session.mode!=='staff' || EX.session.employeeId!==emp.id)){
@@ -741,27 +774,46 @@ EX.completeBootstrap = async function(email, name){
   await EX.setConfig({name:'Engage X Business Solutions', createdAt:EX.now(), baseCurrency:'INR', countries:['India','UAE','Saudi Arabia','Kuwait'], reminderSchedule:[7,3,1,0,-1,-3,-7], bank:{}, qrAssetId:null, taxLabel:'GST', taxRate:18});
   try{ localStorage.removeItem(EX.PENDING_BOOTSTRAP_KEY); }catch(e){}
 };
+// IMPORTANT: this is the ONLY place that's allowed to call EX.completeBootstrap.
+// There used to be two separate call sites — EX.submitBootstrap called
+// EX.completeBootstrap directly right after signUp() returned a session, and
+// EX.maybeAutoCompleteBootstrap (triggered by the onAuthStateChange listener)
+// called it too, guarded by EX._bootstrapCompleting. In a real Supabase
+// client, the SIGNED_IN auth event from signUp() can fire (and start this
+// function running) BEFORE signUp()'s own promise resolves back in
+// EX.submitBootstrap — so both call sites could race, each seeing zero
+// employees, and both insert a super_admin record: every brand-new workspace
+// could silently end up with two duplicate admin accounts. Routing both
+// triggers through this single guarded function (checked synchronously,
+// before any `await`) makes the second caller see EX._bootstrapCompleting
+// already true, or the employee already inserted, and back off.
 EX._bootstrapCompleting = false;
-EX.maybeAutoCompleteBootstrap = async function(){
-  if(!EX.authEmail || !EX.dbReady) return;
-  if(EX.get('employees').length > 0) return; // not a fresh workspace — nothing to finish
+EX.completeBootstrapOnce = async function(email, nameHint){
+  if(!email) return;
+  if(EX.get('employees').length > 0) return; // already done — nothing left to finish
   if(EX._bootstrapCompleting) return;
   EX._bootstrapCompleting = true;
   try{
-    let pendingName = null;
-    try{
-      const raw = localStorage.getItem(EX.PENDING_BOOTSTRAP_KEY);
-      if(raw){
-        const p = JSON.parse(raw);
-        if(p && p.email && p.email.toLowerCase()===EX.authEmail.toLowerCase()) pendingName = p.name;
-      }
-    }catch(e){}
-    await EX.completeBootstrap(EX.authEmail, pendingName);
+    let pendingName = nameHint || null;
+    if(!pendingName){
+      try{
+        const raw = localStorage.getItem(EX.PENDING_BOOTSTRAP_KEY);
+        if(raw){
+          const p = JSON.parse(raw);
+          if(p && p.email && p.email.toLowerCase()===email.toLowerCase()) pendingName = p.name;
+        }
+      }catch(e){}
+    }
+    await EX.completeBootstrap(email, pendingName);
   }catch(e){
-    console.warn('auto-complete bootstrap failed', e);
+    console.warn('bootstrap completion failed', e);
   }finally{
     EX._bootstrapCompleting = false;
   }
+};
+EX.maybeAutoCompleteBootstrap = async function(){
+  if(!EX.authEmail || !EX.employeesReady) return;
+  await EX.completeBootstrapOnce(EX.authEmail);
 };
 EX.signOut = function(){
   if(EX.sb){ try{ EX.sb.auth.signOut(); }catch(e){} }
@@ -821,10 +873,20 @@ EX.renderSignIn = function(){
     const email = EX.authEmail.toLowerCase();
     const matched = EX.get('employees').find(e=> (e.email||'').toLowerCase()===email);
     if(!matched){
+      if(!EX.employeesReady){
+        // The employees table itself hasn't delivered its first snapshot yet —
+        // EX.dbReady can already be true from a different, faster collection,
+        // so this is NOT yet a reliable signal that the workspace is empty.
+        // Just keep waiting for the real employees list; EX.scheduleRender()
+        // fires again the moment it arrives.
+        return `<div class="min-h-screen flex items-center justify-center"><div class="text-center">
+          ${EX.spinner()}<div class="mt-3 text-sm" style="color:var(--ex-ink-soft)">Loading your workspace…</div></div></div>`;
+      }
       if(emps.length===0){
-        // A brand-new workspace with a real signed-in session and no employees
-        // yet is mid auto-bootstrap-completion (EX.maybeAutoCompleteBootstrap) —
-        // not an error, just a moment of work in progress.
+        // Employees list has genuinely loaded and is empty: a brand-new
+        // workspace with a real signed-in session is mid auto-bootstrap-
+        // completion (EX.maybeAutoCompleteBootstrap) — not an error, just a
+        // moment of work in progress.
         return `<div class="min-h-screen flex items-center justify-center"><div class="text-center">
           ${EX.spinner()}<div class="mt-3 text-sm" style="color:var(--ex-ink-soft)">Finishing your workspace setup…</div></div></div>`;
       }
@@ -893,6 +955,20 @@ EX.submitBootstrap = async function(ev){
   const email = (fd.get('email')||'').trim();
   const password = fd.get('password');
   EX.ui.bootstrapError = null;
+  // Remember the name they typed BEFORE calling signUp(), not after: signUp()
+  // can fire its own SIGNED_IN auth event (which tries to auto-complete
+  // bootstrap) before signUp()'s own promise resolves back here — see
+  // EX.completeBootstrapOnce. If that race wins, it looks up the pending name
+  // from localStorage, so that name needs to already be on disk or the
+  // workspace gets created with a name guessed from the email address instead
+  // of what was actually typed in this form.
+  // NOTE: deliberately NOT cleared if signUp() below fails — an "already
+  // registered" error on retry (the exact trap this screen recovers from)
+  // means a previous attempt's pending data is likely still sitting here and
+  // still needed by the "Sign in instead" recovery path; wiping it on this
+  // retry's own failure would throw away the originally-typed name for no
+  // reason, same bug as not saving it early enough.
+  try{ localStorage.setItem(EX.PENDING_BOOTSTRAP_KEY, JSON.stringify({email, name})); }catch(e){}
   let signUpData = null;
   try{
     const { data, error } = await EX.sb.auth.signUp({ email, password });
@@ -901,15 +977,14 @@ EX.submitBootstrap = async function(ev){
   }catch(e){
     EX.ui.bootstrapError = 'Could not create your login.'; EX.scheduleRender(); return;
   }
-  // Remember the name they typed so EX.completeBootstrap() can use it once a
-  // real session exists — see below for why we can't necessarily write the
-  // employee record right this instant.
-  try{ localStorage.setItem(EX.PENDING_BOOTSTRAP_KEY, JSON.stringify({email, name})); }catch(e){}
   if(signUpData && signUpData.session){
     // We already have a real, active session (email confirmation is off, or
     // wasn't required) — finish right away rather than waiting for the next
-    // auth-state event.
-    await EX.completeBootstrap(email, name);
+    // auth-state event. Goes through the same guarded EX.completeBootstrapOnce
+    // as the auto-complete path (not EX.completeBootstrap directly) because
+    // signUp()'s own SIGNED_IN auth event can already be racing to finish
+    // bootstrap on its own — see the comment on EX.completeBootstrapOnce.
+    await EX.completeBootstrapOnce(email, name);
   }else{
     // Supabase project requires email confirmation — there's no active session
     // yet, so writing the employee record now would be rejected by Row Level
@@ -1281,6 +1356,15 @@ EX.render = function(){
     return;
   }
   if(!EX.dbReady && !EX.dbOffline){ root.innerHTML = `<div class="min-h-screen flex items-center justify-center">${EX.spinner()}</div>`; return; }
+  // EX.dbReady only means SOME collection has loaded (whichever of the 23
+  // answered first) — it does NOT mean 'employees' specifically has. A staff
+  // session that was restored from the locally-cached ex_os_session_v1 (e.g.
+  // right after a page refresh) can reach here before the real employees list
+  // has arrived, and EX.currentEmployee() would wrongly look like "not found"
+  // simply because the data isn't loaded yet rather than because the record
+  // was actually removed. This used to sign such users straight back out on
+  // every refresh — wait for EX.employeesReady before trusting that check.
+  if(EX.session.mode==='staff' && !EX.employeesReady){ root.innerHTML = `<div class="min-h-screen flex items-center justify-center">${EX.spinner()}</div>`; return; }
   // if signed-in employee record was removed, sign out (also clears the real Supabase Auth session)
   if(EX.session.mode==='staff' && !EX.currentEmployee()){ EX.signOut(); root.innerHTML = EX.renderSignIn(); return; }
 
@@ -3786,7 +3870,64 @@ EX.views['settings'] = function(){
       <p class="text-sm mb-3" style="color:var(--ex-ink-soft)">This workspace currently has <strong>${EX.demoDataCount()}</strong> seeded demo records (sample leads, clients, invoices, employees, etc.) so you can explore every module. They're tagged internally so you can find and remove them at any time — nothing else in the workspace is affected.</p>
       <button class="ex-btn ex-btn-danger" onclick="EX.confirmClearDemoData()">Clear all demo data</button>
     </div>` : ''}
+    <div class="ex-card p-5 lg:col-span-2">
+      <div class="font-display font-bold text-sm mb-2">Backup &amp; Restore</div>
+      <p class="text-sm mb-3" style="color:var(--ex-ink-soft)">Your data lives in Supabase, completely separate from this app's code — updating or redeploying the app never touches it. This download is your own copy, in case you ever want one: a single file with every record in every module (leads, clients, invoices, employees, tasks, everything). Keep it somewhere safe (email it to yourself, save it to a cloud drive); download a fresh one every so often, and always just before you make a big change.</p>
+      <div class="flex flex-wrap gap-2 items-center">
+        <button class="ex-btn ex-btn-primary" onclick="EX.exportFullBackup()">${EX.icon('download','w-4 h-4')} Download full backup</button>
+        <label class="ex-btn ex-btn-ghost cursor-pointer">${EX.icon('refresh','w-4 h-4')} Restore from backup file<input type="file" accept="application/json,.json" class="hidden" onchange="EX.importBackupFile(event)"/></label>
+      </div>
+      <p class="text-xs mt-3" style="color:var(--ex-ink-soft)">Restoring writes the backup's records back in: anything matching an existing record (same ID) is overwritten with the backup's version, and anything in the backup but missing here is added back. It does not delete anything currently in the workspace. You'll be asked to confirm before anything is written.</p>
+    </div>
   </div>`;
+};
+EX.exportFullBackup = async function(){
+  const payload = {
+    exportedAt: new Date().toISOString(),
+    app: 'Engage X Business Solutions',
+    collections: {},
+  };
+  EX.COLLECTIONS.forEach(c=>{ payload.collections[c] = EX.get(c); });
+  const stamp = new Date().toISOString().slice(0,10);
+  await EX.downloadFile(`EngageX-Backup-${stamp}.json`, JSON.stringify(payload, null, 2));
+  await EX.addAudit('Downloaded full data backup', 'system', null, null, null);
+};
+EX.importBackupFile = async function(ev){
+  const file = ev.target.files && ev.target.files[0];
+  ev.target.value = ''; // allow re-selecting the same file later
+  if(!file) return;
+  let parsed;
+  try{
+    const text = await file.text();
+    parsed = JSON.parse(text);
+  }catch(e){ EX.toast('That file could not be read as a backup — it does not look like valid JSON.', 'bad'); return; }
+  const collections = parsed && parsed.collections;
+  if(!collections || typeof collections !== 'object'){ EX.toast('That file does not look like an Engage X backup.', 'bad'); return; }
+  const summary = Object.keys(collections)
+    .filter(k=> EX.COLLECTIONS.includes(k) && Array.isArray(collections[k]) && collections[k].length)
+    .map(k=> `${collections[k].length} ${k}`).join(', ') || 'no recognizable records';
+  const when = parsed.exportedAt ? EX.fmtDateTime(new Date(parsed.exportedAt).getTime()) : 'an unknown date';
+  EX.confirmAction(
+    'Restore from backup?',
+    `This backup is from ${when} and contains: ${summary}. Restoring overwrites any existing record that shares an ID with one in the backup, and adds back anything in the backup that's currently missing — it does not delete records that only exist in the workspace right now. This can't be undone automatically, so consider downloading a fresh backup of today's data first.`,
+    async ()=>{ await EX.performRestore(collections); },
+    true
+  );
+};
+EX.performRestore = async function(collections){
+  let written = 0, failed = 0;
+  for(const col of Object.keys(collections)){
+    if(!EX.COLLECTIONS.includes(col) || !Array.isArray(collections[col])) continue;
+    for(const row of collections[col]){
+      if(!row || !row.id) continue;
+      const payload = Object.assign({}, row);
+      delete payload.id;
+      try{ await EX.setId(col, row.id, payload); written++; }
+      catch(e){ failed++; }
+    }
+  }
+  await EX.addAudit('Restored data from backup file', 'system', null, null, {written, failed});
+  EX.toast(`Restore complete: ${written} record${written===1?'':'s'} written${failed?`, ${failed} failed`:''}.`, failed ? 'warn' : 'good');
 };
 EX.saveGeneralSettings = async function(ev){
   ev.preventDefault();
