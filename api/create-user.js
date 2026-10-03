@@ -22,7 +22,7 @@
 //   { email, password }
 // -> 200 { ok: true, userId } | 4xx/5xx { error }
 
-const ADMIN_ROLES = ['super_admin', 'ops_head', 'hr'];
+const ADMIN_ROLES = ['super_admin', 'md', 'ops_head', 'dm_manager', 'creative_head', 'hr'];
 
 module.exports = async (req, res) => {
   if (req.method !== 'POST') {
@@ -95,7 +95,7 @@ module.exports = async (req, res) => {
     const empRows = await empResp.json();
     const callerEmp = Array.isArray(empRows) && empRows[0] && empRows[0].data;
     if (!callerEmp || !ADMIN_ROLES.includes(callerEmp.role)) {
-      res.status(403).json({ error: 'Only Super Admin, Ops Head or HR can set up logins for teammates.' });
+      res.status(403).json({ error: 'Only Super Admin / MD, Operations Head / Digital Marketing Manager, Creative Head or HR can set up logins for teammates.' });
       return;
     }
 
