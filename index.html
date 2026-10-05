@@ -150,6 +150,20 @@ EX.effRole = (r)=> EX.ROLE_ALIAS[r] || r;
 // Who may delete tasks / clients etc: Super Admin + MD, Ops Head + Digital Marketing Manager, Creative Head.
 EX.DELETE_ROLES = ['super_admin','ops_head','creative_head'];
 EX.canDelete = ()=> EX.DELETE_ROLES.includes(EX.currentRole());
+// ---- Explicit (raw-role) permissions. These deliberately look at the employee's REAL role, not the alias,
+// because the management lists below are exact: MD, Operations Head / CEO and Super Admin only
+// (a Digital Marketing Manager or Creative Head is NOT on them).
+EX.rawRole = ()=>{ const e = EX.currentEmployee(); return e ? e.role : null; };
+// Client retainer (monthly fee): MD / Super Admin, Ops Head / CEO = view + edit; Accountant = view only; everyone else = hidden.
+EX.RETAINER_EDIT_ROLES = ['super_admin','md','ops_head'];
+EX.RETAINER_VIEW_ROLES = EX.RETAINER_EDIT_ROLES.concat(['accounts']);
+EX.canSeeRetainer  = ()=> EX.RETAINER_VIEW_ROLES.includes(EX.rawRole());
+EX.canEditRetainer = ()=> EX.RETAINER_EDIT_ROLES.includes(EX.rawRole());
+// Monthly committed deliverables (per client): same people may edit; everyone else is view-only.
+EX.canEditDeliverables = ()=> EX.RETAINER_EDIT_ROLES.includes(EX.rawRole());
+// Deleting / removing an employee: MD, Operations Head / CEO, Super Admin only.
+EX.EMP_DELETE_ROLES = ['super_admin','md','ops_head'];
+EX.canDeleteEmployee = ()=> EX.EMP_DELETE_ROLES.includes(EX.rawRole());
 
 // Roles whose designated reports (managerId chain) form the "digital marketing" line:
 // DME's own interns are addressed as "Digital Marketing Intern" throughout, even though
@@ -183,6 +197,7 @@ EX.NAV = [
    {key:'content', label:'Content Studio', icon:'image', roles:['super_admin','ops_head','creative_head','dme','graphic_designer','video_editor','parttime','intern','outsourced_editor']},
    {key:'shoots', label:'Video Shoots', icon:'video', roles:['super_admin','ops_head','creative_head','videographer','video_editor']},
    {key:'tasks', label:'Tasks', icon:'check-square', roles:'*'},
+   {key:'workreport', label:'Work Report', icon:'bar-chart', roles:'*'},
    {key:'workload', label:'Team Workload', icon:'layers', roles:['super_admin','ops_head','hr','sales_exec','creative_head']},
    {key:'support', label:'Support Desk', icon:'life-buoy', roles:['super_admin','ops_head','accounts','dme']},
  ]},
@@ -237,7 +252,7 @@ EX.STATUS_TONE = {
 EX.tone = (s)=> EX.STATUS_TONE[s]||'neutral';
 
 EX.SERVICE_CATALOG = {
- 'Digital Marketing':['Social Media Management: Instagram','Social Media Management: Facebook','Social Media Management: LinkedIn','Social Media Management: TikTok','Social Media Management: YouTube','Google Business Profile Management','Content Strategy','Copywriting','Graphic Design (Posters)','Carousels','Infographics','Reels','Video Editing','AI Videos','Video Production','Photography','Videography'],
+ 'Digital Marketing':['Social Media Management: Instagram','Social Media Management: Facebook','Social Media Management: LinkedIn','Social Media Management: TikTok','Social Media Management: YouTube','Google Business Profile Management','Content Strategy','Copywriting','Graphic Design (Posters)','Carousels','Infographics','Reels','Video Editing','AI Videos','Video Production','Photography','Videography','YouTube Videos'],
  'Advertising — Meta':['Facebook Ads','Instagram Ads','Meta Lead Generation','Meta Traffic','Meta Engagement','Meta Sales Campaigns','WhatsApp Ads','Meta Retargeting'],
  'Advertising — Google':['Google Search Ads','Google Display Ads','YouTube Ads','Performance Max','Google Local Ads','Google Maps Ads','Google Remarketing'],
  'Advertising — LinkedIn':['LinkedIn Lead Generation','LinkedIn Awareness','LinkedIn Recruitment'],
@@ -247,7 +262,7 @@ EX.SERVICE_CATALOG = {
  'Sales Enablement':['Sales Strategy','Sales Funnel Build','Lead Management System','CRM Setup (Sales)','Sales Tracker','Sales Process Design','Sales Training','Closing Training','Follow-up System','Team Training','Customer Journey Mapping','Performance Tracking'],
  'Branding':['Brand Strategy','Logo Design','Brand Identity','Brand Guidelines','Corporate Profile','Brochure Design','Presentation Design','Packaging Design','Creative Direction','Rebranding'],
 };
-EX.QUANTIFIABLE = ['Graphic Design (Posters)','Carousels','Infographics','Reels','Video Editing','AI Videos','Photography','Videography','Blogs'];
+EX.QUANTIFIABLE = ['Graphic Design (Posters)','Carousels','Infographics','Reels','Video Editing','AI Videos','Photography','Videography','Blogs','YouTube Videos'];
 
 EX.LEAD_SOURCES = ['Referral','Website','Google Search','Instagram','LinkedIn','Cold Outreach','Event','WhatsApp Inbound','Requirement Form Link','Other'];
 EX.GOALS = ['Brand Awareness','Leads','Sales','Website Traffic','Social Growth','Recruitment','E-commerce','Local Growth','International Expansion','Other'];
@@ -1801,6 +1816,7 @@ EX.employeeMonthStats = function(empId, ym){
 EX.removeEmployee = function(id, hard){
   const emp = EX.byId('employees', id);
   if(!emp) return;
+  if(!EX.canDeleteEmployee()){ EX.toast('Only the MD, Operations Head / CEO and Super Admin can delete or remove employees.','bad'); return; }
   EX.confirmAction(hard?'Delete profile permanently':'Deactivate employee',
     hard? `This permanently deletes <b>${emp.name}</b>'s profile. Task, attendance and leave history tied to them is kept for records but their profile disappears from every list. This can't be undone.`
         : `<b>${emp.name}</b> will be moved to <b>Removed</b> status and lose workspace access immediately. Their task and attendance history is kept. You can re-activate them later from Employees → filter: Removed.`,
@@ -2098,7 +2114,7 @@ EX.views['dashboard'] = function(){
     ${EX.statCard('Receivables outstanding', EX.fmtMoney(k.receivables), k.overdueTotal>0?`${EX.fmtMoney(k.overdueTotal)} overdue`:'None overdue', k.overdueTotal>0?'bad':'good','credit-card')}
   </div>
   <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
-    ${EX.statCard('Active clients', k.activeClients, `MRR ${EX.fmtMoney(k.mrr)}`,'info','briefcase')}
+    ${EX.statCard('Active clients', k.activeClients, (EX.canSeeRetainer()? `MRR ${EX.fmtMoney(k.mrr)}` : 'Currently on contract'),'info','briefcase')}
     ${EX.statCard('Pipeline value', EX.fmtMoney(k.pipelineValue), `${k.newLeadsMonth} new leads this mo.`,'info','target')}
     ${EX.statCard('Won this month', k.wonMonth, `${k.totalLeads} leads total`,'good','star')}
     ${EX.statCard('Clients at risk', k.atRiskClients, k.atRiskClients?'Needs account-owner attention':'All clients stable', k.atRiskClients?'bad':'good','alert')}
@@ -2754,6 +2770,8 @@ EX.CLIENT_FIELDS = [
   {key:'billingDay', label:'Billing day of month', type:'number'},
   {key:'paymentTerms', label:'Payment terms'},
 ];
+// Client form fields — the retainer field only exists for people allowed to edit it, so it can't be seen or changed by anyone else.
+EX.clientFields = ()=> EX.CLIENT_FIELDS.filter(f=> f.key!=='monthlyFee' || EX.canEditRetainer());
 EX.views['clients'] = function(param){
   if(param) return EX.clientDetail(param);
   const clients = EX.get('clients');
@@ -2766,14 +2784,14 @@ EX.views['clients'] = function(param){
       {label:'Status', get:c=>EX.pill(c.status)+(c.serviceStatus==='On Hold'?' <span class="ex-pill ex-pill-warn">Work paused</span>':'')},
       {label:'Health', get:c=>{const h=EX.computeClientHealth(c); return EX.pill(h.label);}},
       {label:'Country', get:c=>c.country||'—'},
-      ...(finance? [{label:'Monthly fee', get:c=>EX.fmtMoney(c.monthlyFee||0,c.currency)}] : []),
+      ...(EX.canSeeRetainer()? [{label:'Monthly retainer', get:c=>EX.fmtMoney(c.monthlyFee||0,c.currency)}] : []),
       {label:'DME', get:c=>{const e=EX.byId('employees',c.assignedDme); return e?e.name:'—';}},
       ...(EX.canDelete()? [{label:'', get:c=>`<button title="Delete client" onclick="event.stopPropagation();EX.deleteClientModal('${c.id}')" class="ex-btn ex-btn-ghost ex-btn-sm !p-1.5" style="color:var(--ex-bad)">${EX.icon('trash','w-4 h-4')}</button>`}] : []),
     ], emptyLabel:'No clients yet', emptySub:'Clients are created automatically when a proposal is marked Won.'})}`;
 };
 EX.showAddClientModal = function(){
   if(!EX.canSeeFinancials()){ EX.toast('You do not have permission to add clients.','bad'); return; }
-  const fields = EX.CLIENT_FIELDS.map(f=> f.key==='assignedDme'? Object.assign({},f,{options:EX.get('employees').filter(e=>['dme','dm_manager'].includes(e.role)).map(e=>({value:e.id,label:e.name}))}) : f);
+  const fields = EX.clientFields().map(f=> f.key==='assignedDme'? Object.assign({},f,{options:EX.get('employees').filter(e=>['dme','dm_manager'].includes(e.role)).map(e=>({value:e.id,label:e.name}))}) : f);
   EX.openModal(`${EX.modalHeader('Add client directly', 'For clients onboarded outside the standard lead → proposal flow.')}
     <form onsubmit="EX.submitAddClient(event)" class="p-5 max-h-[70vh] overflow-y-auto">${EX.formGrid(fields,{status:'Active',serviceStatus:'Active',currency:'INR'},2)}
     <div class="flex justify-end gap-2 pt-3 mt-2 border-t" style="border-color:var(--ex-line)"><button type="button" class="ex-btn ex-btn-ghost" onclick="EX.closeModal()">Cancel</button><button class="ex-btn ex-btn-primary">Create client</button></div></form>`,{wide:true});
@@ -2781,7 +2799,7 @@ EX.showAddClientModal = function(){
 EX.submitAddClient = async function(ev){
   ev.preventDefault();
   if(!EX.canSeeFinancials()){ EX.toast('You do not have permission to add clients.','bad'); return; }
-  const data = EX.readForm(ev.target, EX.CLIENT_FIELDS);
+  const data = EX.readForm(ev.target, EX.clientFields());
   data.services=[]; data.platforms=[]; data.contractStart=EX.now(); data.durationMonths=12; data.serviceStatus='Active';
   let id;
   try{ id = await EX.add('clients', data); }catch(e){ return; }
@@ -2818,7 +2836,7 @@ EX.clientDetail = function(id){
 EX.editClientModal = function(id){
   if(!EX.canSeeFinancials()){ EX.toast('You do not have permission to edit client accounts.','bad'); return; }
   const c = EX.byId('clients', id);
-  const fields = EX.CLIENT_FIELDS.map(f=> f.key==='assignedDme'? Object.assign({},f,{options:EX.get('employees').filter(e=>['dme','dm_manager'].includes(e.role)).map(e=>({value:e.id,label:e.name}))}) : f);
+  const fields = EX.clientFields().map(f=> f.key==='assignedDme'? Object.assign({},f,{options:EX.get('employees').filter(e=>['dme','dm_manager'].includes(e.role)).map(e=>({value:e.id,label:e.name}))}) : f);
   EX.openModal(`${EX.modalHeader('Edit client')}<form onsubmit="EX.submitEditClient(event,'${id}')" class="p-5 max-h-[70vh] overflow-y-auto">${EX.formGrid(fields,c,2)}
     <div class="flex justify-end gap-2 pt-3 mt-2 border-t" style="border-color:var(--ex-line)"><button type="button" class="ex-btn ex-btn-ghost" onclick="EX.closeModal()">Cancel</button><button class="ex-btn ex-btn-primary">Save</button></div></form>`,{wide:true});
 };
@@ -2826,7 +2844,7 @@ EX.submitEditClient = async function(ev,id){
   ev.preventDefault();
   if(!EX.canSeeFinancials()){ EX.toast('You do not have permission to edit client accounts.','bad'); return; }
   const before = EX.byId('clients', id);
-  const data = EX.readForm(ev.target, EX.CLIENT_FIELDS);
+  const data = EX.readForm(ev.target, EX.clientFields());
   try{ await EX.patch('clients', id, data); }catch(e){ return; }
   await EX.addAudit('Edited client','clients',id,before,data);
   EX.closeModal(); EX.toast('Client updated','good');
@@ -2845,7 +2863,7 @@ EX.clientOverview = function(c){
     ${contactCard}
     <div class="ex-card p-5">
       <div class="font-display font-bold text-sm mb-2">Billing snapshot</div>
-      ${row('Monthly fee', EX.fmtMoney(c.monthlyFee||0,c.currency))}
+      ${EX.canSeeRetainer()?row('Monthly retainer', EX.fmtMoney(c.monthlyFee||0,c.currency)):''}
       ${row('Ad spend (pass-through)', EX.fmtMoney(c.adSpendPassthrough||0,c.currency))}
       ${row('Billing day', c.billingDay)}
       ${row('Contract start', EX.fmtDate(c.contractStart))}
@@ -3091,7 +3109,7 @@ EX.clientHealthTab = function(c, health){
     <div class="ex-card p-5"><div class="ex-label">Client Health Score</div><div class="font-display text-3xl font-bold tnum my-1">${health.score}</div>${EX.pill(health.label)}
       <ul class="text-xs mt-3 space-y-1" style="color:var(--ex-ink-soft)">${health.reasons.map(r=>`<li>• ${r}</li>`).join('')}</ul></div>
     <div class="lg:col-span-2 ex-card p-5"><div class="font-display font-bold text-sm mb-2">Contract</div>
-      ${row('Package', (c.services||[]).length+' services active')}${finance?row('Monthly fee', EX.fmtMoney(c.monthlyFee||0,c.currency)):''}
+      ${row('Package', (c.services||[]).length+' services active')}${EX.canSeeRetainer()?row('Monthly retainer', EX.fmtMoney(c.monthlyFee||0,c.currency)):''}
       ${finance?row('Ad spend pass-through', EX.fmtMoney(c.adSpendPassthrough||0,c.currency)):''}${row('Contract start', EX.fmtDate(c.contractStart))}
       ${row('Duration', (c.durationMonths||'—')+' months')}${finance?row('Payment terms', c.paymentTerms):''}${row('Delivery status', EX.pill(c.serviceStatus||'Active'))}
       ${finance?`<div class="mt-3"><button onclick="EX.toggleServiceHold('${c.id}')" class="ex-btn ${c.serviceStatus==='On Hold'?'ex-btn-primary':'ex-btn-danger'} ex-btn-sm">${c.serviceStatus==='On Hold'?'Resume service':'Put service on hold'}</button></div>`:''}
@@ -3224,7 +3242,7 @@ EX.clientContentTab = function(c){
   <div class="ex-card p-4 mb-4"><div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
       <div><div class="text-xs mb-1" style="color:var(--ex-ink-soft)">Delivery progress (delivered of committed)</div>${EX.trackerBar(t.tot.delivered, t.target)}</div>
       <div><div class="text-xs mb-1" style="color:var(--ex-ink-soft)">Client approval progress (approved of committed)</div>${EX.trackerBar(t.tot.approved, t.target, 'var(--ex-blue-500)')}</div></div>
-    ${EX.trackerTypeTable(t)}</div>
+    ${EX.deliverablePlanBar(c, ym)}${EX.trackerTypeTable(t)}</div>
   <div class="flex items-center justify-between mb-3"><div class="font-display font-bold text-sm">Content Pipeline (all months)</div><button onclick="EX.addContentModal('${c.id}')" class="ex-btn ex-btn-primary ex-btn-sm">${EX.icon('plus','w-3.5 h-3.5')} New content item</button></div>
   ${EX.dataTable({id:'contentTable_'+c.id, rows:items, searchKey:x=>x.title+x.type, filterOptions:EX.CONTENT_STATUSES, filterKey:x=>x.status, filterLabel:'status',
     rowClick:x=>`EX.openContentDrawer('${x.id}')`,
@@ -3244,7 +3262,7 @@ EX.addContentModal = function(clientId){
     <form onsubmit="EX.saveContent(event,'${clientId}')" class="p-5 space-y-3">
       ${EX.formGrid([
         {key:'title',label:'Title',required:true},
-        {key:'type',label:'Type',type:'select',options:EX.CONTENT_TYPES},
+        {key:'type',label:'Type',type:'select',options:EX.allContentTypes()},
         {key:'forMonth',label:'Counts towards month',type:'month',hint:'Which month\'s committed deliverables this item belongs to.'},
         {key:'assignedTo',label:'Assigned to',type:'select',options:EX.get('employees').filter(e=>['graphic_designer','video_editor','dme','dm_manager','parttime','intern','outsourced_editor'].includes(e.role)).map(e=>({value:e.id,label:e.name}))},
         {key:'deadline',label:'Deadline',type:'date'},
@@ -3452,8 +3470,8 @@ EX.saveWorkRequestUpdate = async function(ev, id){
 };
 /* ================= CONTENT STUDIO (global) ================= */
 /* ---- Content tracking model: committed (from the client's package) vs created vs delivered vs approved, per month ---- */
-EX.CONTENT_TYPES = ['Poster','Carousel','Reel','Infographic','AI Video','Video','Photo','Blog','Story'];
-EX.SERVICE_TO_CONTENT = {'Graphic Design (Posters)':'Poster','Carousels':'Carousel','Infographics':'Infographic','Reels':'Reel','Video Editing':'Video','AI Videos':'AI Video','Photography':'Photo','Videography':'Video','Blogs':'Blog'};
+EX.CONTENT_TYPES = ['Poster','Carousel','Reel','YouTube Video','Infographic','AI Video','Video','Photo','Blog','Story'];
+EX.SERVICE_TO_CONTENT = {'Graphic Design (Posters)':'Poster','Carousels':'Carousel','Infographics':'Infographic','Reels':'Reel','Video Editing':'Video','AI Videos':'AI Video','Photography':'Photo','Videography':'Video','Blogs':'Blog','YouTube Videos':'YouTube Video'};
 EX.CLIENT_APPROVALS = ['Pending','Approved','Re-work'];
 EX.APPROVAL_TONE = {'Pending':'warn','Approved':'good','Re-work':'bad'};
 EX.approvalPill = (a)=> `<span class="ex-pill ex-pill-${EX.APPROVAL_TONE[a]||'neutral'}">${a}</span>`;
@@ -3466,13 +3484,96 @@ EX.contentApproval = function(x){
   if(['Revision','Rejected'].includes(x.status)) return 'Re-work';
   return 'Pending';
 };
-EX.clientCommitted = function(c){
+/* Monthly committed deliverables per client.
+   client.deliverablePlan = { base:{Reel:12,...}|null, months:{ '2026-10':{...} } }
+   Resolution order for a month: that month's own plan -> the client's default plan -> quantities in the client's package (Services tab). */
+EX.DELIVERABLE_PRESETS = ['Reel','Poster','YouTube Video'];
+EX.cleanPlan = (o)=>{ const out={}; Object.keys(o||{}).forEach(k=>{ const n=Math.round(Number(o[k])); if(k && n>0) out[k]=n; }); return out; };
+EX.allContentTypes = function(){
+  const set = EX.CONTENT_TYPES.slice();
+  EX.get('clients').forEach(c=>{ const p=c.deliverablePlan||{}; [p.base].concat(Object.values(p.months||{})).forEach(o=>Object.keys(o||{}).forEach(k=>{ if(!set.some(x=>x.toLowerCase()===k.toLowerCase())) set.push(k); })); });
+  return set;
+};
+EX.committedSource = function(c, ym){
+  const p = c.deliverablePlan||{};
+  if(p.months && p.months[ym]) return 'month';
+  if(p.base) return 'default';
+  return 'package';
+};
+EX.clientCommitted = function(c, ym){
+  ym = ym || EX.monthKey();
+  const p = c.deliverablePlan||{}, src = EX.committedSource(c, ym);
+  if(src==='month') return EX.cleanPlan(p.months[ym]);
+  if(src==='default') return EX.cleanPlan(p.base);
   const out = {};
   (c.services||[]).forEach(sv=>{ const t = EX.SERVICE_TO_CONTENT[sv.item]; if(t && Number(sv.qty)>0) out[t] = (out[t]||0) + Number(sv.qty); });
   return out;
 };
+EX.committedSourceLabel = (src)=> ({month:'Custom plan for this month', default:'Default monthly plan', package:'From package quantities'}[src]);
+EX.editDeliverablesModal = function(clientId, ym){
+  if(!EX.canEditDeliverables()){ EX.toast('Only the Super Admin / MD, CEO / Operations Head can change committed deliverables.','bad'); return; }
+  const c = EX.byId('clients', clientId); if(!c) return;
+  ym = ym || EX.ui.contentMonth || EX.monthKey();
+  const cur = EX.clientCommitted(c, ym), src = EX.committedSource(c, ym);
+  const keys = EX.DELIVERABLE_PRESETS.slice(); Object.keys(cur).forEach(k=>{ if(!keys.includes(k)) keys.push(k); });
+  const rowHtml = (k, locked)=>`<div data-plan-row class="grid grid-cols-[1fr_110px] gap-2 items-center"><input data-plan-type class="ex-input" value="${EX.esc(k)}" ${locked?'readonly':''} placeholder="Deliverable name (e.g. Brochure)" maxlength="40"/><input data-plan-qty type="number" min="0" step="1" class="ex-input" value="${cur[k]||''}" placeholder="per month"/></div>`;
+  EX.openModal(`${EX.modalHeader('Monthly committed deliverables', EX.esc(c.companyName))}
+    <form onsubmit="EX.saveDeliverables(event,'${clientId}','${ym}')" class="p-5 space-y-3 max-h-[70vh] overflow-y-auto">
+      <div class="text-xs" style="color:var(--ex-ink-soft)">How many of each deliverable has this client been promised every month? Leave a quantity empty (or 0) to remove it. Add any other deliverable from the client's package with the button below.</div>
+      <div id="planRows" class="space-y-2">${keys.map(k=>rowHtml(k, EX.DELIVERABLE_PRESETS.includes(k))).join('')}</div>
+      <button type="button" class="ex-btn ex-btn-ghost ex-btn-sm" onclick="EX.addPlanRow()">${EX.icon('plus','w-3.5 h-3.5')} Add another deliverable</button>
+      <div class="rounded-xl p-3 text-sm space-y-1.5" style="background:var(--ex-blue-50)">
+        <label class="flex items-start gap-2"><input type="radio" name="scope" value="base" ${src==='month'?'':'checked'} class="mt-1"/><span><b>Every month</b> (default plan) — applies to all months that don't have their own custom plan.</span></label>
+        <label class="flex items-start gap-2"><input type="radio" name="scope" value="month" ${src==='month'?'checked':''} class="mt-1"/><span><b>Only ${EX.monthLabel(ym)}</b> — a one-off change for this month.</span></label>
+      </div>
+      <div class="flex justify-between gap-2 pt-2 border-t" style="border-color:var(--ex-line)"><div>${src==='month'?`<button type="button" class="ex-btn ex-btn-ghost" style="color:var(--ex-bad)" onclick="EX.clearMonthDeliverables('${clientId}','${ym}')">Remove this month's custom plan</button>`:''}</div><div class="flex gap-2"><button type="button" class="ex-btn ex-btn-ghost" onclick="EX.closeModal()">Cancel</button><button class="ex-btn ex-btn-primary">Save commitments</button></div></div>
+    </form>`);
+};
+EX.addPlanRow = function(){
+  const box = document.getElementById('planRows'); if(!box) return;
+  const d = document.createElement('div'); d.setAttribute('data-plan-row',''); d.className='grid grid-cols-[1fr_110px] gap-2 items-center';
+  d.innerHTML = '<input data-plan-type class="ex-input" placeholder="Deliverable name (e.g. Brochure)" maxlength="40"/><input data-plan-qty type="number" min="0" step="1" class="ex-input" placeholder="per month"/>';
+  box.appendChild(d); d.querySelector('input').focus();
+};
+EX.saveDeliverables = async function(ev, clientId, ym){
+  ev.preventDefault();
+  if(!EX.canEditDeliverables()){ EX.toast('Only the Super Admin / MD, CEO / Operations Head can change committed deliverables.','bad'); return; }
+  const c = EX.byId('clients', clientId); if(!c) return;
+  const known = EX.allContentTypes();
+  const obj = {};
+  ev.target.querySelectorAll('[data-plan-row]').forEach(r=>{
+    let name = (r.querySelector('[data-plan-type]').value||'').trim().slice(0,40);
+    const qty = Math.round(Number(r.querySelector('[data-plan-qty]').value));
+    if(!name || !(qty>0)) return;
+    const match = known.find(x=>x.toLowerCase()===name.toLowerCase()); if(match) name = match;
+    obj[name] = (obj[name]||0) + qty;
+  });
+  const scope = new FormData(ev.target).get('scope')==='month' ? 'month' : 'base';
+  const before = c.deliverablePlan||null;
+  const plan = JSON.parse(JSON.stringify(before||{base:null, months:{}})); plan.months = plan.months||{};
+  if(scope==='base') plan.base = obj; else plan.months[ym] = obj;
+  try{ await EX.patch('clients', clientId, {deliverablePlan: plan}); }catch(e){ return; }
+  await EX.addAudit('Committed deliverables changed','clients',clientId,{plan:before},{scope, month: scope==='month'?ym:null, committed:obj});
+  EX.closeModal(); EX.toast('Committed deliverables saved','good');
+};
+EX.clearMonthDeliverables = async function(clientId, ym){
+  if(!EX.canEditDeliverables()) return;
+  const c = EX.byId('clients', clientId); if(!c || !c.deliverablePlan) return;
+  const before = c.deliverablePlan;
+  const plan = JSON.parse(JSON.stringify(before)); if(plan.months) delete plan.months[ym];
+  try{ await EX.patch('clients', clientId, {deliverablePlan: plan}); }catch(e){ return; }
+  await EX.addAudit('Month-specific deliverables removed','clients',clientId,{month:ym,committed:(before.months||{})[ym]},null);
+  EX.closeModal(); EX.toast('Custom plan removed — back to the default','good');
+};
+// Small header shown above every committed-vs-delivered table: where the numbers come from + who can change them.
+EX.deliverablePlanBar = function(c, ym){
+  const src = EX.committedSource(c, ym);
+  return `<div class="flex flex-wrap items-center justify-between gap-2 mb-3"><div class="text-xs" style="color:var(--ex-ink-soft)"><b style="color:var(--ex-ink)">Committed per month:</b> ${EX.committedSourceLabel(src)}</div>
+    ${EX.canEditDeliverables()? `<button onclick="EX.editDeliverablesModal('${c.id}','${ym}')" class="ex-btn ex-btn-ghost ex-btn-sm">${EX.icon('edit','w-3.5 h-3.5')} Edit committed deliverables</button>`
+      : `<span class="ex-pill ex-pill-neutral" title="Only Super Admin / MD and CEO / Operations Head can change commitments">${EX.icon('lock','w-3 h-3 inline mr-1')}View only</span>`}</div>`;
+};
 EX.contentTrackerFor = function(c, ym){
-  const committed = EX.clientCommitted(c);
+  const committed = EX.clientCommitted(c, ym);
   const items = EX.get('content').filter(x=>x.clientId===c.id && EX.contentMonth(x)===ym);
   const types = Object.keys(committed); items.forEach(x=>{ const t=x.type||'Other'; if(!types.includes(t)) types.push(t); });
   const rows = types.map(t=>{
@@ -3522,9 +3623,9 @@ EX.trackerBar = function(done, total, color){
   return `<div class="flex items-center gap-2"><div class="h-1.5 rounded-full flex-1 min-w-[60px]" style="background:var(--ex-line)"><div class="h-1.5 rounded-full" style="width:${pct}%;background:${color||'var(--ex-good)'}"></div></div><span class="text-xs tnum" style="color:var(--ex-ink-soft)">${pct}%</span></div>`;
 };
 EX.trackerTypeTable = function(t){
-  if(!t.rows.length) return `<div class="text-xs p-3" style="color:var(--ex-ink-soft)">No committed deliverables are set in this client's package (Services tab) and nothing has been created for ${EX.monthLabel(t.ym)}.</div>`;
-  return `<div class="overflow-x-auto"><table class="ex-table"><thead><tr><th>Type</th><th class="text-right">Committed</th><th class="text-right">Created</th><th class="text-right">Delivered</th><th class="text-right">Approved</th><th class="text-right">Re-work</th><th class="text-right">Pending</th><th class="text-right">Still to deliver</th></tr></thead><tbody>
-    ${t.rows.map(r=>`<tr><td>${EX.esc(r.type)}</td><td class="text-right tnum">${r.committed||'—'}</td><td class="text-right tnum">${r.created}</td><td class="text-right tnum">${r.delivered}</td><td class="text-right tnum" style="color:var(--ex-good)">${r.approved}</td><td class="text-right tnum" style="color:${r.rework?'var(--ex-bad)':'inherit'}">${r.rework}</td><td class="text-right tnum" style="color:${r.pending?'var(--ex-warn)':'inherit'}">${r.pending}</td><td class="text-right tnum" style="color:${r.shortfall?'var(--ex-bad)':'var(--ex-good)'}">${r.committed? r.shortfall : '—'}</td></tr>`).join('')}
+  if(!t.rows.length) return `<div class="text-xs p-3" style="color:var(--ex-ink-soft)">No committed deliverables are set for this client yet (use Edit committed deliverables) and nothing has been created for ${EX.monthLabel(t.ym)}.</div>`;
+  return `<div class="overflow-x-auto"><table class="ex-table"><thead><tr><th>Type</th><th class="text-right">Committed</th><th class="text-right">Created</th><th class="text-right">Delivered</th><th class="text-right">Approved</th><th class="text-right">Re-work</th><th class="text-right">Pending</th><th class="text-right">Pending balance</th></tr></thead><tbody>
+    ${t.rows.map(r=>`<tr><td>${EX.esc(r.type)}</td><td class="text-right tnum">${r.committed||'—'}</td><td class="text-right tnum">${r.created}</td><td class="text-right tnum">${r.delivered}</td><td class="text-right tnum" style="color:var(--ex-good)">${r.approved}</td><td class="text-right tnum" style="color:${r.rework?'var(--ex-bad)':'inherit'}">${r.rework}</td><td class="text-right tnum" style="color:${r.pending?'var(--ex-warn)':'inherit'}">${r.pending}</td><td class="text-right tnum" style="color:${r.shortfall?'var(--ex-bad)':'var(--ex-good)'}">${r.committed? r.shortfall : '—'}${r.extra?` <span class="text-[10px]" style="color:var(--ex-ink-soft)">(+${r.extra} extra)</span>`:''}</td></tr>`).join('')}
     <tr style="font-weight:600"><td>Total</td><td class="text-right tnum">${t.tot.committed}</td><td class="text-right tnum">${t.tot.created}</td><td class="text-right tnum">${t.tot.delivered}</td><td class="text-right tnum">${t.tot.approved}</td><td class="text-right tnum">${t.tot.rework}</td><td class="text-right tnum">${t.tot.pending}</td><td class="text-right tnum">${t.tot.shortfall}</td></tr>
   </tbody></table></div>`;
 };
@@ -3782,7 +3883,7 @@ EX.showAddInvoiceModal = function(clientId){
       <div><label class="ex-label">Notes</label><textarea name="notes" class="ex-textarea" rows="2"></textarea></div>
       <div class="flex justify-end gap-2 pt-3 mt-2 border-t" style="border-color:var(--ex-line)"><button type="button" class="ex-btn ex-btn-ghost" onclick="EX.closeModal()">Cancel</button><button class="ex-btn ex-btn-primary">Create invoice</button></div>
     </form>`,{wide:true});
-  EX.addInvoiceLineRow('Monthly Retainer — Engage X Service Fee', 1, (clientId&&EX.byId('clients',clientId)?EX.byId('clients',clientId).monthlyFee:0)||0);
+  EX.addInvoiceLineRow('Monthly Retainer — Engage X Service Fee', 1, (EX.canSeeRetainer()&&clientId&&EX.byId('clients',clientId)?EX.byId('clients',clientId).monthlyFee:0)||0);
 };
 EX.addInvoiceLineRow = function(desc, qty, rate){
   const box = document.getElementById('lineItemsBox');
@@ -4175,8 +4276,8 @@ EX.views['employees'] = function(param){
       {label:'This month score', get:e=>{const s=EX.employeeMonthStats(e.id); return `<span class="tnum font-semibold">${s.productivityScore}</span>`;}},
       {label:'Actions', get:e=>`<div class="flex gap-1">
         <button onclick="event.stopPropagation();EX.showEmpModal('${e.id}')" class="ex-btn ex-btn-ghost ex-btn-sm !p-1.5" title="Edit">${EX.icon('edit','w-3.5 h-3.5')}</button>
-        ${e.status==='Removed'?`<button onclick="event.stopPropagation();EX.reactivateEmployee('${e.id}')" class="ex-btn ex-btn-ghost ex-btn-sm">Reactivate</button>`:`<button onclick="event.stopPropagation();EX.removeEmployee('${e.id}',false)" class="ex-btn ex-btn-ghost ex-btn-sm !p-1.5" title="Deactivate">${EX.icon('log-out','w-3.5 h-3.5')}</button>`}
-        <button onclick="event.stopPropagation();EX.removeEmployee('${e.id}',true)" class="ex-btn ex-btn-danger ex-btn-sm !p-1.5" title="Delete permanently">${EX.icon('trash','w-3.5 h-3.5')}</button>
+        ${e.status==='Removed'?`<button onclick="event.stopPropagation();EX.reactivateEmployee('${e.id}')" class="ex-btn ex-btn-ghost ex-btn-sm">Reactivate</button>`:(EX.canDeleteEmployee()?`<button onclick="event.stopPropagation();EX.removeEmployee('${e.id}',false)" class="ex-btn ex-btn-ghost ex-btn-sm !p-1.5" title="Deactivate">${EX.icon('log-out','w-3.5 h-3.5')}</button>`:'')}
+        ${EX.canDeleteEmployee()?`<button onclick="event.stopPropagation();EX.removeEmployee('${e.id}',true)" class="ex-btn ex-btn-danger ex-btn-sm !p-1.5" title="Delete permanently">${EX.icon('trash','w-3.5 h-3.5')}</button>`:''}
       </div>`},
     ], emptyLabel:'No employees yet'})}`;
 };
@@ -4421,6 +4522,119 @@ EX.confirmDeleteAsset = function(id){
 };
 
 /* ================= TEAM WORKLOAD ("who's working on what") ================= */
+/* ================= WORK REPORT ================= */
+/* One place to review completed work: client deliverables (committed vs delivered vs pending balance), employee output, and a log of everything completed in the month.
+   Scope: management (Super Admin/MD, Ops Head/CEO, DMM, Creative Head, HR) see everybody; a DME sees their own team; everyone else sees their own work.
+   Client deliverables are visible to everyone who can see the client (view-only — only Super Admin/MD and CEO/Ops Head can change commitments). Retainer amounts never appear here. */
+EX.workReportScope = function(){
+  const role = EX.currentRole();
+  if(['super_admin','ops_head','creative_head','hr'].includes(role)) return 'all';
+  if(role==='dme') return 'team';
+  return 'self';
+};
+EX.workReportEmployees = function(){
+  const scope = EX.workReportScope(), me = EX.session.employeeId;
+  let emps = EX.get('employees').filter(e=>e.status!=='Removed');
+  if(scope==='team') emps = emps.filter(e=>e.id===me || e.managerId===me);
+  else if(scope==='self') emps = emps.filter(e=>e.id===me);
+  return emps.sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+};
+EX.workReportData = function(ym){
+  const trs = EX.trackerClients().map(c=>EX.contentTrackerFor(c, ym));
+  const emps = EX.workReportEmployees(); const ids = new Set(emps.map(e=>e.id));
+  const scope = EX.workReportScope();
+  const inScope = (empId)=> scope==='all' || (empId && ids.has(empId));
+  const empRows = emps.map(e=>{
+    const st = EX.employeeMonthStats(e.id, ym);
+    const mine = EX.get('content').filter(x=>x.assignedTo===e.id && EX.contentMonth(x)===ym);
+    return {emp:e, st, contentCreated:mine.length, contentDelivered:mine.filter(x=>EX.isDelivered(x)||EX.contentApproval(x)==='Approved').length, contentApproved:mine.filter(x=>EX.contentApproval(x)==='Approved').length};
+  });
+  const log = [];
+  EX.get('tasks').forEach(t=>{ if(t.status==='Done' && t.completedAt && EX.monthKey(new Date(t.completedAt))===ym && inScope(t.assignedTo))
+    log.push({date:t.completedAt, kind:'Task', title:t.title, client:(EX.byId('clients',t.clientId)||{}).companyName||'', who:t.assignedToName||((EX.byId('employees',t.assignedTo)||{}).name)||'', status:'Done'}); });
+  EX.get('content').forEach(x=>{ if(EX.contentMonth(x)===ym && (EX.isDelivered(x)||EX.contentApproval(x)==='Approved') && inScope(x.assignedTo))
+    log.push({date:x.clientApprovalAt||x._updatedAt||x._createdAt||0, kind:'Content ('+(x.type||'—')+')', title:x.title, client:(EX.byId('clients',x.clientId)||{}).companyName||'', who:((EX.byId('employees',x.assignedTo)||{}).name)||x._createdByName||'', status:EX.contentApproval(x)==='Approved'?'Approved':x.status}); });
+  log.sort((a,b)=>(b.date||0)-(a.date||0));
+  const active = trs.filter(t=>!t.paused);
+  const tot = active.reduce((a,t)=>{ a.committed+=t.tot.committed; a.delivered+=t.tot.delivered; a.approved+=t.tot.approved; a.balance+=t.tot.shortfall; return a; },{committed:0,delivered:0,approved:0,balance:0});
+  return {ym, trs, empRows, log, tot, tasksDone: log.filter(l=>l.kind==='Task').length};
+};
+EX.ui.wrTab = EX.ui.wrTab || 'clients';
+EX.setWrTab = (t)=>{ EX.ui.wrTab = t; EX.scheduleRender(); };
+EX.views['workreport'] = function(){
+  const ym = EX.ui.contentMonth || EX.monthKey();
+  const d = EX.workReportData(ym); const scope = EX.workReportScope();
+  let tab = EX.ui.wrTab || 'clients'; if(scope==='self' && tab==='employees') tab='log';
+  const tabs = [['clients','Client deliverables']].concat(scope==='self'?[]:[['employees','Employee performance']]).concat([['log','Completed work']]);
+  const kpi = (l,v,col,sub)=>`<div class="ex-card p-3"><div class="ex-label">${l}</div><div class="font-display text-xl font-bold tnum" style="color:${col||'var(--ex-ink)'}">${v}</div>${sub?`<div class="text-[11px]" style="color:var(--ex-ink-soft)">${sub}</div>`:''}</div>`;
+  const sub = scope==='all'? 'All clients and employees' : scope==='team'? 'Your clients and your team' : 'Your own work, plus client deliverables';
+  const pill = (b)=> b>0? `<span class="ex-pill ex-pill-warn">${b} pending</span>` : `<span class="ex-pill ex-pill-good">Complete</span>`;
+  let body = '';
+  if(tab==='clients'){
+    body = `<div class="ex-card overflow-hidden"><div class="overflow-x-auto"><table class="ex-table"><thead><tr><th>Client</th><th>Deliverable</th><th class="text-right">Committed</th><th class="text-right">Delivered</th><th class="text-right">Pending balance</th><th class="text-right">Approved</th><th></th></tr></thead><tbody>
+    ${d.trs.length? d.trs.map(t=>{ const c=t.client;
+      const head = `<tr style="background:var(--ex-blue-50);font-weight:600"><td colspan="2"><div class="flex items-center gap-2">${EX.avatar(c.companyName,22)}<a href="#/clients/${c.id}" onclick="EX.ui.clientTab='content'">${EX.esc(c.companyName)}</a>${t.paused?'<span class="ex-pill ex-pill-warn">Work paused</span>':''}</div></td>
+        <td class="text-right tnum">${t.tot.committed}</td><td class="text-right tnum">${t.tot.delivered}</td><td class="text-right tnum" style="color:${t.tot.shortfall?'var(--ex-bad)':'var(--ex-good)'}">${t.tot.shortfall}</td><td class="text-right tnum">${t.tot.approved}</td>
+        <td class="text-right">${EX.canEditDeliverables()?`<button onclick="EX.editDeliverablesModal('${c.id}','${ym}')" class="ex-btn ex-btn-ghost ex-btn-sm">${EX.icon('edit','w-3.5 h-3.5')} Edit</button>`:''}</td></tr>`;
+      const rows = t.rows.map(r=>`<tr><td></td><td>${EX.esc(r.type)}</td><td class="text-right tnum">${r.committed||'—'}</td><td class="text-right tnum">${r.delivered}</td><td class="text-right tnum" style="color:${r.shortfall?'var(--ex-bad)':'var(--ex-good)'}">${r.committed? r.shortfall : '—'}${r.extra?` <span class="text-[10px]" style="color:var(--ex-ink-soft)">(+${r.extra} extra)</span>`:''}</td><td class="text-right tnum">${r.approved}</td><td class="text-right">${r.committed? pill(r.shortfall):''}</td></tr>`).join('');
+      return head + (rows || `<tr><td></td><td colspan="6" class="text-xs" style="color:var(--ex-ink-soft)">No committed deliverables set yet${EX.canEditDeliverables()?' — click Edit to set them':''}.</td></tr>`);
+    }).join('') : `<tr><td colspan="7">${EX.empty('No clients to show')}</td></tr>`}
+    </tbody></table></div></div>
+    <div class="text-xs mt-2" style="color:var(--ex-ink-soft)">${EX.canEditDeliverables()?'You can edit committed quantities here or in each client\'s Content tab.':'Committed quantities are view-only for your role — they are set by the Super Admin / MD, CEO / Operations Head.'}</div>`;
+  } else if(tab==='employees'){
+    body = `<div class="ex-card overflow-hidden"><div class="overflow-x-auto"><table class="ex-table"><thead><tr><th>Employee</th><th>Role</th><th class="text-right">Tasks done</th><th class="text-right">On time</th><th class="text-right">Content delivered</th><th class="text-right">Days present</th><th class="text-right">EOD reports</th><th class="text-right">Score</th></tr></thead><tbody>
+    ${d.empRows.map(r=>`<tr style="cursor:pointer" onclick="EX.route('employees','${r.emp.id}')"><td><div class="flex items-center gap-2">${EX.avatar(r.emp.name,24)}<span class="font-medium">${EX.esc(r.emp.name)}</span></div></td><td>${EX.esc((EX.ROLES[r.emp.role]||{}).label||r.emp.role)}</td>
+      <td class="text-right tnum">${r.st.tasksCompleted} / ${r.st.tasksAssigned}</td><td class="text-right tnum">${r.st.tasksCompleted? Math.round(r.st.onTimeRate*100)+'%':'—'}</td><td class="text-right tnum">${r.contentDelivered} / ${r.contentCreated}</td><td class="text-right tnum">${r.st.daysPresent}</td><td class="text-right tnum">${r.st.eodDays}</td><td class="text-right tnum font-semibold">${r.st.productivityScore}</td></tr>`).join('') || `<tr><td colspan="8">${EX.empty('No employees to show')}</td></tr>`}
+    </tbody></table></div></div>`;
+  } else {
+    body = EX.dataTable({id:'wrLog', rows:d.log, searchKey:l=>`${l.title} ${l.client} ${l.who} ${l.kind}`, columns:[
+      {label:'Date', get:l=>EX.fmtDate(l.date)},{label:'Type', get:l=>EX.esc(l.kind)},{label:'Work', get:l=>EX.esc(l.title)},{label:'Client', get:l=>EX.esc(l.client||'—')},{label:'Done by', get:l=>EX.esc(l.who||'—')},{label:'Status', get:l=>EX.pill(l.status)}],
+      emptyLabel:'No completed work recorded for '+EX.monthLabel(ym)});
+  }
+  return `${EX.pageHead('Work Report', sub, `${EX.contentMonthBar()}<button onclick="EX.downloadWorkReportCsv('${ym}')" class="ex-btn ex-btn-ghost">${EX.icon('download','w-4 h-4')} CSV</button><button onclick="EX.downloadWorkReportPdf('${ym}')" class="ex-btn ex-btn-primary">${EX.icon('file-text','w-4 h-4')} PDF</button>`)}
+  <div class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">${kpi('Committed',d.tot.committed,'', 'Active clients, '+EX.monthLabel(ym))}${kpi('Delivered',d.tot.delivered+' / '+d.tot.committed)}${kpi('Pending balance',d.tot.balance,d.tot.balance?'var(--ex-bad)':'var(--ex-good)')}${kpi('Client approved',d.tot.approved,'var(--ex-good)')}${kpi('Tasks completed',d.tasksDone)}</div>
+  <div class="flex gap-1 mb-3 border-b overflow-x-auto" style="border-color:var(--ex-line)">${tabs.map(([k,l])=>`<button onclick="EX.setWrTab('${k}')" class="px-3 py-2 text-sm font-medium border-b-2 -mb-px whitespace-nowrap" style="border-color:${tab===k?'var(--ex-blue-600)':'transparent'};color:${tab===k?'var(--ex-blue-600)':'var(--ex-ink-soft)'}">${l}</button>`).join('')}</div>
+  ${body}`;
+};
+EX.downloadWorkReportCsv = async function(ym){
+  ym = ym || EX.ui.contentMonth || EX.monthKey();
+  const d = EX.workReportData(ym); const scope = EX.workReportScope();
+  let tab = EX.ui.wrTab || 'clients'; if(scope==='self' && tab==='employees') tab='log';
+  let csv, name;
+  if(tab==='clients'){
+    const rows = []; d.trs.forEach(t=> t.rows.forEach(r=> rows.push({client:t.client.companyName, type:r.type, committed:r.committed, delivered:r.delivered, balance:r.committed? r.shortfall : '', approved:r.approved, paused:t.paused?'Yes':''})));
+    csv = EX.toCsv(rows, [{label:'Client',key:'client'},{label:'Deliverable',key:'type'},{label:'Committed',key:'committed'},{label:'Delivered',key:'delivered'},{label:'Pending balance',key:'balance'},{label:'Approved',key:'approved'},{label:'Work paused',key:'paused'}]); name='client-deliverables';
+  } else if(tab==='employees'){
+    csv = EX.toCsv(d.empRows, [{label:'Employee',get:r=>r.emp.name},{label:'Role',get:r=>(EX.ROLES[r.emp.role]||{}).label||r.emp.role},{label:'Tasks completed',get:r=>r.st.tasksCompleted},{label:'Tasks assigned',get:r=>r.st.tasksAssigned},{label:'On-time %',get:r=>r.st.tasksCompleted?Math.round(r.st.onTimeRate*100):''},{label:'Content delivered',get:r=>r.contentDelivered},{label:'Days present',get:r=>r.st.daysPresent},{label:'EOD reports',get:r=>r.st.eodDays},{label:'Score',get:r=>r.st.productivityScore}]); name='employee-performance';
+  } else {
+    csv = EX.toCsv(d.log, [{label:'Date',get:l=>l.date? new Date(l.date).toISOString().slice(0,10):''},{label:'Type',key:'kind'},{label:'Work',key:'title'},{label:'Client',key:'client'},{label:'Done by',key:'who'},{label:'Status',key:'status'}]); name='completed-work';
+  }
+  await EX.downloadFile(`Work-Report-${name}-${ym}.csv`, csv);
+};
+EX.downloadWorkReportPdf = async function(ym){
+  ym = ym || EX.ui.contentMonth || EX.monthKey();
+  const d = EX.workReportData(ym); const scope = EX.workReportScope();
+  const doc = EX.pdfNew('Work Report', `${EX.monthLabel(ym)}  |  ${scope==='all'?'All clients and employees':scope==='team'?'Your clients and team':'Your work'}`);
+  doc.heading('Deliverables overview (paused clients excluded)');
+  doc.stats([{label:'Committed',value:String(d.tot.committed)},{label:'Delivered',value:`${d.tot.delivered} / ${d.tot.committed}`},{label:'Pending balance',value:String(d.tot.balance)},{label:'Client approved',value:String(d.tot.approved)}],4);
+  doc.progress('Delivery progress', d.tot.delivered, d.tot.committed);
+  doc.heading('Client deliverables: committed vs delivered');
+  const rows = [];
+  d.trs.forEach(t=>{
+    rows.push(Object.assign([t.client.companyName+(t.paused?' (paused)':''), 'All deliverables', t.tot.committed, t.tot.delivered, t.tot.shortfall],{__bold:true}));
+    t.rows.forEach(r=> rows.push(['', r.type, r.committed||'-', r.delivered, r.committed? r.shortfall : '-']));
+  });
+  doc.table([{label:'Client',w:2.6},{label:'Deliverable',w:2,},{label:'Committed',w:1.2,align:'right'},{label:'Delivered',w:1.2,align:'right'},{label:'Pending balance',w:1.5,align:'right'}], rows, {empty:'No clients'});
+  if(scope!=='self'){
+    doc.heading('Employee performance');
+    doc.table([{label:'Employee',w:2.4},{label:'Role',w:2},{label:'Tasks done',w:1.1,align:'right'},{label:'On time',w:0.9,align:'right'},{label:'Content',w:1,align:'right'},{label:'EOD',w:0.7,align:'right'},{label:'Score',w:0.8,align:'right'}],
+      d.empRows.map(r=>[r.emp.name, (EX.ROLES[r.emp.role]||{}).label||r.emp.role, `${r.st.tasksCompleted}/${r.st.tasksAssigned}`, r.st.tasksCompleted? Math.round(r.st.onTimeRate*100)+'%':'-', `${r.contentDelivered}/${r.contentCreated}`, r.st.eodDays, r.st.productivityScore]), {empty:'No employees'});
+  }
+  doc.heading('Completed work');
+  doc.paragraph(`${d.log.length} completed item${d.log.length===1?'':'s'} recorded${d.log.length>80?' (latest 80 shown)':''}.`, {size:9});
+  doc.table([{label:'Date',w:1.3},{label:'Type',w:1.6},{label:'Work',w:3},{label:'Client',w:1.8},{label:'Done by',w:1.6}], d.log.slice(0,80).map(l=>[EX.fmtDate(l.date), l.kind, l.title, l.client||'-', l.who||'-']), {empty:'No completed work recorded'});
+  await EX.saveDoc(doc, `Work-Report-${ym}.pdf`);
+};
 EX.views['workload'] = function(){
   const emps = EX.get('employees').filter(e=>e.status==='Active');
   const rows = emps.map(e=>{
@@ -4675,8 +4889,8 @@ EX.askAdvisor = async function(ev){
   const q = new FormData(ev.target).get('q'); ev.target.reset();
   const k = EX.computeKPIs();
   const log = document.getElementById('advisor-log'); log.innerHTML='';
-  const clientSummary = EX.get('clients').filter(c=>c.status==='Active').map(c=>`${c.companyName}: fee ${c.monthlyFee||0}, health ${EX.computeClientHealth(c).label}`).join('; ');
-  const dataBlock = `LIVE WORKSPACE DATA (facts):\nRevenue this month: ${k.revenueMonth}\nCash received this month: ${k.cashMonth}\nOperating profit this month: ${k.profitMonth}\nReceivables outstanding: ${k.receivables} (of which overdue: ${k.overdueTotal})\nMRR: ${k.mrr}\nActive clients: ${k.activeClients}\nPipeline value: ${k.pipelineValue}\nClients at risk: ${k.atRiskClients}\nPer-client snapshot: ${clientSummary||'none yet'}`;
+  const clientSummary = EX.get('clients').filter(c=>c.status==='Active').map(c=>`${c.companyName}: ${EX.canSeeRetainer()?'fee '+(c.monthlyFee||0)+', ':''}health ${EX.computeClientHealth(c).label}`).join('; ');
+  const dataBlock = `LIVE WORKSPACE DATA (facts):\nRevenue this month: ${k.revenueMonth}\nCash received this month: ${k.cashMonth}\nOperating profit this month: ${k.profitMonth}\nReceivables outstanding: ${k.receivables} (of which overdue: ${k.overdueTotal})${EX.canSeeRetainer()?'\nMRR: '+k.mrr:''}\nActive clients: ${k.activeClients}\nPipeline value: ${k.pipelineValue}\nClients at risk: ${k.atRiskClients}\nPer-client snapshot: ${clientSummary||'none yet'}`;
   const rowUser = document.createElement('div'); rowUser.innerHTML = `<div class="text-xs font-semibold mb-0.5">You</div><div class="text-sm">${q}</div>`; log.appendChild(rowUser);
   const rowAi = document.createElement('div'); rowAi.innerHTML = `<div class="text-xs font-semibold mb-0.5" style="color:var(--ex-blue-600)">AI Business Advisor</div><div class="text-sm ai-live" style="white-space:pre-wrap">Thinking…</div>`; log.appendChild(rowAi);
   EX.advisorHistory.push({role:'user', content: EX.advisorHistory.length? q : `You are the AI Business Advisor inside Engage X Business Solutions' operating system. Answer using ONLY the data given — never invent numbers. Clearly separate "Facts" (from the data) and "Recommendation" (your judgment). You cannot approve prices, discounts, contracts or salary changes — only recommend; a human must act.\n\n${dataBlock}\n\nQuestion: ${q}`});
@@ -5026,8 +5240,8 @@ EX.downloadClientWorkReportPdf = async function(clientId, ym){
   ], 4);
   doc.progress('Delivery progress', t.tot.delivered, t.target);
   doc.progress('Client approval progress  ('+t.labelFull+')', t.tot.approved, t.target, {color:[47,99,238]});
-  doc.table([{label:'Type',w:2},{label:'Committed',w:1.2,align:'right'},{label:'Created',w:1,align:'right'},{label:'Delivered',w:1.1,align:'right'},{label:'Approved',w:1.1,align:'right'},{label:'Re-work',w:1,align:'right'},{label:'Pending',w:1,align:'right'}],
-    t.rows.map(r=>[r.type, r.committed||'-', r.created, r.delivered, r.approved, r.rework, r.pending]).concat(t.rows.length?[Object.assign(['Total',t.tot.committed,t.tot.created,t.tot.delivered,t.tot.approved,t.tot.rework,t.tot.pending],{__bold:true})]:[]),
+  doc.table([{label:'Type',w:2},{label:'Committed',w:1.2,align:'right'},{label:'Created',w:1,align:'right'},{label:'Delivered',w:1.1,align:'right'},{label:'Approved',w:1.1,align:'right'},{label:'Re-work',w:1,align:'right'},{label:'Pending',w:1,align:'right'},{label:'Pending balance',w:1.5,align:'right'}],
+    t.rows.map(r=>[r.type, r.committed||'-', r.created, r.delivered, r.approved, r.rework, r.pending, r.committed? r.shortfall : '-']).concat(t.rows.length?[Object.assign(['Total',t.tot.committed,t.tot.created,t.tot.delivered,t.tot.approved,t.tot.rework,t.tot.pending,t.tot.shortfall],{__bold:true})]:[]),
     {empty:'No committed deliverables set for this client'});
   if(t.items.length){
     doc.heading('Content items this month');
@@ -5052,8 +5266,8 @@ EX.downloadContentTrackerPdf = async function(ym){
   doc.progress('Delivery progress', k.delivered, k.committed);
   doc.progress('Client approval progress', k.approved, k.committed, {color:[47,99,238]});
   doc.heading('By client');
-  doc.table([{label:'Client',w:3},{label:'Committed',w:1.2,align:'right'},{label:'Delivered',w:1.2,align:'right'},{label:'Approved',w:1.2,align:'right'},{label:'Re-work',w:1,align:'right'},{label:'Pending',w:1,align:'right'},{label:'Status',w:2.4}],
-    trs.map(t=>[t.client.companyName, t.tot.committed, t.tot.delivered, t.tot.approved, t.tot.rework, t.tot.pending, t.labelFull]), {empty:'No clients'});
+  doc.table([{label:'Client',w:3},{label:'Committed',w:1.2,align:'right'},{label:'Delivered',w:1.2,align:'right'},{label:'Approved',w:1.2,align:'right'},{label:'Re-work',w:1,align:'right'},{label:'Pending',w:1,align:'right'},{label:'Balance',w:1.1,align:'right'},{label:'Status',w:2.2}],
+    trs.map(t=>[t.client.companyName, t.tot.committed, t.tot.delivered, t.tot.approved, t.tot.rework, t.tot.pending, t.tot.shortfall, t.labelFull]), {empty:'No clients'});
   await EX.saveDoc(doc, `Content-Tracker-${ym}.pdf`);
 };
 EX.generateMonthlyReport = async function(clientId, ym){
@@ -5157,7 +5371,7 @@ EX.portalViews['portal-contracts'] = function(){
   const c = EX.portalClient(); if(!c) return EX.empty('');
   const row=(l,v)=>`<div class="flex justify-between py-1.5 border-b text-sm" style="border-color:var(--ex-line-soft)"><span style="color:var(--ex-ink-soft)">${l}</span><span class="font-medium text-right">${v||'—'}</span></div>`;
   return `${EX.pageHead('Contract')}<div class="ex-card p-5 max-w-xl">
-    ${row('Package', (c.services||[]).length+' services')}${row('Monthly fee', EX.fmtMoney(c.monthlyFee||0,c.currency))}
+    ${row('Package', (c.services||[]).length+' services')}
     ${row('One-time charges', EX.fmtMoney(c.oneTimeFee||0,c.currency))}${row('Ad spend pass-through', EX.fmtMoney(c.adSpendPassthrough||0,c.currency))}
     ${row('Billing date', 'Day '+(c.billingDay||5)+' of month')}${row('Payment terms', c.paymentTerms)}
     ${row('Contract start', EX.fmtDate(c.contractStart))}${row('Duration', (c.durationMonths||'—')+' months')}
