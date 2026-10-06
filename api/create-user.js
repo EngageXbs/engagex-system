@@ -1,5 +1,5 @@
 // Vercel serverless function (Node.js runtime).
-// Lets an already-signed-in Super Admin / Ops Head / HR teammate create a real
+// Lets an already-signed-in Super Admin (or MD) create a real
 // Supabase Auth login (email + password) for another employee.
 //
 // This does NOT use the browser-side supabase-js `signUp()` call on purpose:
@@ -22,7 +22,7 @@
 //   { email, password }
 // -> 200 { ok: true, userId } | 4xx/5xx { error }
 
-const ADMIN_ROLES = ['super_admin', 'md', 'ops_head', 'dm_manager', 'creative_head', 'hr'];
+const ADMIN_ROLES = ['super_admin', 'md']; // only the Super Admin (the MD is a Super Admin) may create logins
 
 module.exports = async (req, res) => {
   if (req.method !== 'POST') {
@@ -95,7 +95,7 @@ module.exports = async (req, res) => {
     const empRows = await empResp.json();
     const callerEmp = Array.isArray(empRows) && empRows[0] && empRows[0].data;
     if (!callerEmp || !ADMIN_ROLES.includes(callerEmp.role)) {
-      res.status(403).json({ error: 'Only Super Admin / MD, Operations Head / Digital Marketing Manager, Creative Head or HR can set up logins for teammates.' });
+      res.status(403).json({ error: 'Only the Super Admin can set up logins for teammates.' });
       return;
     }
 
