@@ -421,6 +421,7 @@ EX.makeSupabaseDb = function(sb){
             _updatedAt: r.updated_at ? new Date(r.updated_at).getTime() : undefined,
           }) })) });
         }
+        (EX._reload = EX._reload || {})[name] = ()=> load(0);
         load();
         try{
           sb.channel('rt_'+name)
@@ -537,6 +538,7 @@ EX.initDb = async function(){
     EX.CAP.db = EX.makeSupabaseDb(EX.sb);
   }catch(e){ console.warn('Supabase init failed', e); EX.CAP.db = null; EX.sb = null; }
   if(!EX.CAP.db){ EX.dbOffline = true; EX.scheduleRender(); return; }
+  EX.loadWorkspaceStatus();
   // IMPORTANT: wait for the Supabase Auth session to finish loading/attaching to
   // this client BEFORE subscribing to any table. supabase-js restores a
   // persisted session asynchronously in the background after createClient(), and
@@ -562,6 +564,22 @@ EX.initDb = async function(){
 };
 
 EX.get = (col)=> EX.data[col] || [];
+// Show a save / edit / delete on screen immediately (optimistic), then re-read the collection from the database to confirm.
+// Without this a new row only appeared when Supabase's live-update push arrived — which can lag or not arrive at all.
+EX.NO_EAGER_RELOAD = ['auditLog','notifications'];
+EX.afterWrite = async function(col, op, id, payload){
+  try{
+    const list = EX.data[col];
+    if(Array.isArray(list)){
+      if(op==='add') list.push(Object.assign({id}, payload));
+      else if(op==='patch'){ const it = list.find(d=>d.id===id); if(it) Object.assign(it, payload); }
+      else if(op==='set'){ const i = list.findIndex(d=>d.id===id); if(i>=0) list[i] = Object.assign({id}, payload); else list.push(Object.assign({id}, payload)); }
+      else if(op==='remove'){ const i = list.findIndex(d=>d.id===id); if(i>=0) list.splice(i,1); }
+      EX.scheduleRender();
+    }
+    if(!EX.NO_EAGER_RELOAD.includes(col) && EX._reload && EX._reload[col]) await EX._reload[col]();
+  }catch(e){ console.warn('afterWrite', col, e); }
+};
 EX.byId = (col,id)=> EX.get(col).find(d=>d.id===id);
 EX.add = async function(col,payload){
   if(!EX.CAP.db){ EX.toast('This view is not connected to the workspace database — check that SUPABASE_URL/SUPABASE_ANON_KEY are set correctly in config.js and that the Supabase project is reachable.', 'bad'); throw Object.assign(new Error('db unavailable'), {_exHandled:true}); }
@@ -576,6 +594,7 @@ EX.add = async function(col,payload){
   }catch(_e){}
   try{
     const ref = await EX.CAP.db.collection(col).add(body);
+    EX.afterWrite(col, 'add', ref.id, body);
     return ref.id;
   }catch(e){
     console.warn('EX.add failed', col, e);
@@ -587,7 +606,9 @@ EX.add = async function(col,payload){
 EX.setId = async function(col,id,payload){
   if(!EX.CAP.db){ EX.toast('This view is not connected to the workspace database — check that SUPABASE_URL/SUPABASE_ANON_KEY are set correctly in config.js and that the Supabase project is reachable.', 'bad'); throw Object.assign(new Error('db unavailable'), {_exHandled:true}); }
   try{
-    await EX.CAP.db.collection(col).doc(id).set(Object.assign({}, payload, {_updatedAt: EX.now()}));
+    const full = Object.assign({}, payload, {_updatedAt: EX.now()});
+    await EX.CAP.db.collection(col).doc(id).set(full);
+    EX.afterWrite(col, 'set', id, full);
   }catch(e){
     console.warn('EX.setId failed', col, id, e);
     EX.toast(EX.friendlyErrorMessage(e,'Save'), 'bad');
@@ -598,7 +619,9 @@ EX.setId = async function(col,id,payload){
 EX.patch = async function(col,id,payload){
   if(!EX.CAP.db){ EX.toast('This view is not connected to the workspace database — check that SUPABASE_URL/SUPABASE_ANON_KEY are set correctly in config.js and that the Supabase project is reachable.', 'bad'); throw Object.assign(new Error('db unavailable'), {_exHandled:true}); }
   try{
-    await EX.CAP.db.collection(col).doc(id).update(Object.assign({}, payload, {_updatedAt: EX.now()}));
+    const full = Object.assign({}, payload, {_updatedAt: EX.now()});
+    await EX.CAP.db.collection(col).doc(id).update(full);
+    EX.afterWrite(col, 'patch', id, full);
   }catch(e){
     console.warn('EX.patch failed', col, id, e);
     EX.toast(EX.friendlyErrorMessage(e,'Update'), 'bad');
@@ -610,6 +633,7 @@ EX.remove = async function(col,id){
   if(!EX.CAP.db){ EX.toast('This view is not connected to the workspace database — check that SUPABASE_URL/SUPABASE_ANON_KEY are set correctly in config.js and that the Supabase project is reachable.', 'bad'); throw Object.assign(new Error('db unavailable'), {_exHandled:true}); }
   try{
     await EX.CAP.db.collection(col).doc(id).delete();
+    EX.afterWrite(col, 'remove', id);
   }catch(e){
     console.warn('EX.remove failed', col, id, e);
     EX.toast(EX.friendlyErrorMessage(e,'Delete'), 'bad');
@@ -988,11 +1012,26 @@ EX.can = (navKey)=> EX.session.mode==='staff' && EX.navAllowed(EX.currentRole(),
 // profile" step anymore.
 EX.authEmail = null;
 EX.authReady = false;
+// Before anyone signs in, Row Level Security hides the employees table, so the browser always sees "0 employees" and
+// cannot tell a brand-new workspace from an established one. api/status.js answers that (true/false) using the server key.
+EX.workspaceInit = null;           // true = already set up, false = genuinely empty, null = unknown (endpoint unavailable)
+EX.workspaceStatusDone = false;
+EX.loadWorkspaceStatus = async function(){
+  try{
+    const r = await Promise.race([ fetch('/api/status', {cache:'no-store'}), new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')), 5000)) ]);
+    if(r && r.ok){ const j = await r.json(); if(typeof j.initialized==='boolean') EX.workspaceInit = j.initialized; }
+  }catch(e){ /* endpoint missing / offline — stay "unknown" (the safe default: show Sign in, never auto-create anything) */ }
+  EX.workspaceStatusDone = true;
+  EX.scheduleRender();
+};
+// Re-read every collection (used right after sign-in: whatever was fetched before sign-in was fetched as "anon" and is empty).
+EX.refreshAll = function(){ return Promise.all(Object.keys(EX._reload||{}).map(k=>{ try{ return EX._reload[k](); }catch(e){ return null; } })); };
 EX.initAuth = async function(){
   if(!EX.sb) return;
   EX.sb.auth.onAuthStateChange((_event, session)=>{
     EX.authEmail = (session && session.user && session.user.email) || null;
     EX.authReady = true;
+    if(EX.authEmail) EX.refreshAll();
     EX.maybeAutoCompleteBootstrap();
     EX.scheduleRender();
   });
@@ -1012,7 +1051,7 @@ EX.initAuth = async function(){
 EX.syncSessionFromAuth = function(){
   if(!EX.authEmail || !EX.employeesReady) return;
   const email = EX.authEmail.toLowerCase();
-  const emp = EX.get('employees').find(e=> (e.email||'').toLowerCase()===email);
+  const emp = EX.get('employees').filter(e=> (e.email||'').trim().toLowerCase()===email).sort((a,b)=>(a._createdAt||0)-(b._createdAt||0))[0];
   if(emp && (EX.session.mode!=='staff' || EX.session.employeeId!==emp.id)){
     EX.session = {mode:'staff', employeeId:emp.id, portalClientId:null};
     EX.saveSessionLocal();
@@ -1030,9 +1069,23 @@ EX.syncSessionFromAuth = function(){
 // moment a real, matching Supabase Auth session shows up (confirmation click,
 // or a plain sign-in) for a workspace that still has zero employees.
 EX.PENDING_BOOTSTRAP_KEY = 'ex_pending_bootstrap_v1';
+// Fresh, AUTHENTICATED read straight from the database (never the possibly-stale local copy, which is empty if it was
+// fetched before sign-in). true = employees exist, false = genuinely none, null = couldn't tell (treat as "exists": do nothing).
+EX.workspaceHasEmployees = async function(){
+  try{
+    const { data, error } = await EX.sb.from('employees').select('id');
+    if(error) return null;
+    return (data||[]).length > 0;
+  }catch(e){ return null; }
+};
 EX.completeBootstrap = async function(email, name){
+  // Last line of defence: never create a first admin (or overwrite company settings) if anything exists already.
+  const has = await EX.workspaceHasEmployees();
+  if(has!==false){ if(has===true) EX.refreshAll(); return; }
   await EX.add('employees', {name: name || (email.split('@')[0]), email, role:'super_admin', department:'Leadership', status:'Active', employmentType:'Full-time', joiningDate:EX.now(), skills:[], managerId:null});
-  await EX.setConfig({name:'Engage X Business Solutions', createdAt:EX.now(), baseCurrency:'INR', countries:['India','UAE','Saudi Arabia','Kuwait'], reminderSchedule:[7,3,1,0,-1,-3,-7], bank:{}, qrAssetId:null, taxLabel:'GST', taxRate:18});
+  let hasConfig = true;
+  try{ const { data } = await EX.sb.from('config').select('id').eq('id','company').maybeSingle(); hasConfig = !!data; }catch(e){ hasConfig = true; }
+  if(!hasConfig) await EX.setConfig({name:'Engage X Business Solutions', createdAt:EX.now(), baseCurrency:'INR', countries:['India','UAE','Saudi Arabia','Kuwait'], reminderSchedule:[7,3,1,0,-1,-3,-7], bank:{}, qrAssetId:null, taxLabel:'GST', taxRate:18});
   try{ localStorage.removeItem(EX.PENDING_BOOTSTRAP_KEY); }catch(e){}
 };
 // IMPORTANT: this is the ONLY place that's allowed to call EX.completeBootstrap.
@@ -1052,6 +1105,7 @@ EX._bootstrapCompleting = false;
 EX.completeBootstrapOnce = async function(email, nameHint){
   if(!email) return;
   if(EX.get('employees').length > 0) return; // already done — nothing left to finish
+  if(EX.workspaceInit===true) return;        // the server says this workspace is already set up
   if(EX._bootstrapCompleting) return;
   EX._bootstrapCompleting = true;
   try{
@@ -1099,7 +1153,7 @@ EX.exitPortalPreview = function(){
 
 EX.renderSignIn = function(){
   const emps = EX.get('employees');
-  if(!EX.dbReady && !EX.dbOffline){
+  if((!EX.dbReady || !EX.workspaceStatusDone) && !EX.dbOffline){
     return `<div class="min-h-screen flex items-center justify-center"><div class="text-center">
       ${EX.spinner()}<div class="mt-3 text-sm" style="color:var(--ex-ink-soft)">Connecting to Engage X workspace…</div></div></div>`;
   }
@@ -1132,7 +1186,7 @@ EX.renderSignIn = function(){
   // Signed in to Supabase Auth, but no employee record uses this email.
   if(EX.authEmail){
     const email = EX.authEmail.toLowerCase();
-    const matched = EX.get('employees').find(e=> (e.email||'').toLowerCase()===email);
+    const matched = EX.get('employees').find(e=> (e.email||'').trim().toLowerCase()===email);
     if(!matched){
       if(!EX.employeesReady){
         // The employees table itself hasn't delivered its first snapshot yet —
@@ -1156,7 +1210,7 @@ EX.renderSignIn = function(){
         <div class="ex-card p-6 text-center">
           ${EX.icon('alert','w-8 h-8 mx-auto mb-3')}
           <h2 class="font-display text-lg font-bold mb-2">No matching employee profile</h2>
-          <p class="text-sm mb-4" style="color:var(--ex-ink-soft)">You're signed in as <b>${EX.authEmail}</b>, but no employee record in this workspace uses that exact email. Ask a Super Admin, Ops Head or HR teammate to add you with this email (or fix the email on your existing profile), then sign in again.</p>
+          <p class="text-sm mb-4" style="color:var(--ex-ink-soft)">You're signed in as <b>${EX.authEmail}</b>, but no employee record in this workspace uses that exact email. Ask your Super Admin to add you with this email (or fix the email on your existing profile), then sign in again.</p>
           <button onclick="EX.signOut()" class="ex-btn ex-btn-ghost">Sign out</button>
         </div>
       </div></div></div>`;
@@ -1164,13 +1218,16 @@ EX.renderSignIn = function(){
     // matched: EX.render() will pick this up via EX.syncSessionFromAuth() and
     // move past the sign-in screen entirely — nothing further to render here.
   }
-  const hasEmployees = emps.length > 0;
+  // An established workspace NEVER shows "Create workspace" — not even by accident while the employee list is still hidden by Row Level Security.
+  const hasEmployees = emps.length > 0 || EX.workspaceInit===true;
+  const verifiedEmpty = !hasEmployees && EX.workspaceInit===false;
   // Recovery escape hatch: if a first "Create workspace" attempt got partway
   // through (e.g. the Supabase account was created but confirming email /
   // finishing setup was interrupted), trying to bootstrap again just fails
   // with "already registered". Signing in with those same credentials instead
   // reaches EX.maybeAutoCompleteBootstrap(), which finishes the job.
-  const showLogin = hasEmployees || EX.ui.showLoginInstead;
+  // unknown status (endpoint unavailable): default to Sign in, with a small link for genuine first-time setup
+  const showLogin = hasEmployees || (verifiedEmpty ? !!EX.ui.showLoginInstead : !EX.ui.showSetup);
   const loginForm = `<div class="ex-card p-5">
     <div class="font-semibold text-sm mb-3">Sign in</div>
     <form onsubmit="EX.submitLogin(event)" class="space-y-3">
@@ -1186,11 +1243,11 @@ EX.renderSignIn = function(){
       <div class="w-full max-w-lg">
         <div class="lg:hidden flex items-center gap-3 font-display font-bold text-xl mb-8">${EX.brandMark(false,true)}Engage X</div>
         <h1 class="font-display text-2xl font-bold mb-1">Sign in to your workspace</h1>
-        <p class="text-sm mb-6" style="color:var(--ex-ink-soft)">${hasEmployees? 'Use the email and password your admin set up for you.' : (showLogin? 'Sign in with the email and password you already started creating.' : 'No employees yet — set up your workspace below.')}</p>
+        <p class="text-sm mb-6" style="color:var(--ex-ink-soft)">${hasEmployees? 'Use the email and password your admin set up for you.' : (showLogin? 'Sign in with the email and password your admin set up for you.' : 'No employees yet — set up your workspace below.')}</p>
         ${showLogin ? loginForm : EX.renderBootstrap()}
-        ${!hasEmployees ? `<div class="mt-3 text-center"><button onclick="EX.ui.showLoginInstead=!EX.ui.showLoginInstead;EX.scheduleRender()" class="text-xs underline" style="color:var(--ex-ink-soft)">${EX.ui.showLoginInstead? '← Back to creating the first account' : 'Already started creating an account? Sign in instead'}</button></div>` : ''}
+        ${verifiedEmpty ? `<div class="mt-3 text-center"><button onclick="EX.ui.showLoginInstead=!EX.ui.showLoginInstead;EX.scheduleRender()" class="text-xs underline" style="color:var(--ex-ink-soft)">${EX.ui.showLoginInstead? '← Back to creating the first account' : 'Already started creating an account? Sign in instead'}</button></div>` : (!hasEmployees ? `<div class="mt-3 text-center"><button onclick="EX.ui.showSetup=!EX.ui.showSetup;EX.scheduleRender()" class="text-xs underline" style="color:var(--ex-ink-soft)">${EX.ui.showSetup? '← Back to sign in' : 'Brand-new workspace with no employees yet? Set it up here'}</button></div>` : '')}
         <div class="mt-8 text-xs leading-relaxed p-3 rounded-lg" style="background:var(--ex-blue-50);color:var(--ex-ink-soft)">
-          ${EX.icon('info','w-3.5 h-3.5 inline -mt-0.5 mr-1')} Each teammate signs in with their own email and password (Supabase Auth). A Super Admin, Ops Head or HR teammate creates logins for others from an employee's profile page — see the README for how Row Level Security enforces this at the database level too.
+          ${EX.icon('info','w-3.5 h-3.5 inline -mt-0.5 mr-1')} Each teammate signs in with their own email and password (Supabase Auth). Only the Super Admin creates logins for others, from an employee's profile page — see the README for how Row Level Security enforces this at the database level too.
         </div>
       </div>
     </div>
@@ -4031,8 +4088,38 @@ EX.views['payments'] = function(){
     columns:[
       {label:'Client',get:p=>p.clientName||'—'},{label:'Invoice',get:p=>p.invNo||'—'},{label:'Amount',get:p=>EX.fmtMoney(p.amountClaimed)},
       {label:'Method',get:p=>p.method},{label:'Ref',get:p=>p.transactionRef||'—'},{label:'Status',get:p=>EX.pill(p.status)},
-      {label:'Actions',get:p=> p.status==='Under Verification' ? `<div class="flex gap-1"><button onclick="EX.verifyPayment('${p.id}',true)" class="ex-btn ex-btn-primary ex-btn-sm">Verify</button><button onclick="EX.verifyPayment('${p.id}',false)" class="ex-btn ex-btn-danger ex-btn-sm">Reject</button></div>` : (p.status==='Paid'?`<button onclick="EX.viewReceipt('${p.id}')" class="ex-btn ex-btn-ghost ex-btn-sm">Receipt</button>`:(p.rejectionReason||'—'))}
+      {label:'Actions',get:p=> p.status==='Under Verification' ? `<div class="flex gap-1"><button onclick="EX.verifyPayment('${p.id}',true)" class="ex-btn ex-btn-primary ex-btn-sm">Verify</button><button onclick="EX.verifyPayment('${p.id}',false)" class="ex-btn ex-btn-danger ex-btn-sm">Reject</button></div>` : (p.status==='Paid'?`<button onclick="EX.viewReceipt('${p.id}')" class="ex-btn ex-btn-ghost ex-btn-sm">Receipt</button>`:(p.rejectionReason||'—'))},
+      ...(EX.canManageFinance()? [{label:'',get:p=>EX.rowActions(`EX.showPaymentEditModal('${p.id}')`,`EX.deletePayment('${p.id}')`)}] : [])
     ], emptyLabel:'No payments yet'})}`;
+};
+EX.showPaymentEditModal = function(id){
+  if(!EX.finGuard()) return;
+  const p = EX.byId('payments', id); if(!p) return;
+  const inv = EX.byId('invoices', p.invoiceId)||{};
+  EX.openModal(`${EX.modalHeader('Edit payment record', EX.esc(inv.invoiceNumber||''))}
+    <form onsubmit="EX.savePaymentEdit(event,'${id}')" class="p-5 space-y-3">
+      ${EX.formGrid([{key:'amountClaimed',label:'Amount',type:'number',required:true},{key:'method',label:'Method',type:'select',options:['Bank Transfer','UPI','Cash','Cheque','Online Gateway','QR Code','Personal Account']},{key:'transactionRef',label:'Reference / transaction ID'},{key:'dateClaimed',label:'Date',type:'date'}],p,2)}
+      <div class="text-xs" style="color:var(--ex-ink-soft)">The invoice's Paid / Partially Paid status is recalculated when you save.</div>
+      <div class="flex justify-end gap-2"><button type="button" class="ex-btn ex-btn-ghost" onclick="EX.closeModal()">Cancel</button><button class="ex-btn ex-btn-primary">Save</button></div>
+    </form>`);
+};
+EX.savePaymentEdit = async function(ev, id){
+  ev.preventDefault(); if(!EX.finGuard()) return;
+  const p = EX.byId('payments', id); if(!p) return;
+  const data = EX.readForm(ev.target,[{key:'amountClaimed',type:'number'},{key:'method'},{key:'transactionRef'},{key:'dateClaimed',type:'date'}]);
+  try{ await EX.patch('payments', id, data); await EX.recomputeInvoiceStatus(p.invoiceId); }catch(e){ return; }
+  await EX.addAudit('Payment record edited','payments',id,{amountClaimed:p.amountClaimed,method:p.method,transactionRef:p.transactionRef},data);
+  EX.closeModal(); EX.toast('Payment updated','good');
+};
+EX.deletePayment = function(id){
+  if(!EX.finGuard()) return;
+  const p = EX.byId('payments', id); if(!p) return;
+  const inv = EX.byId('invoices', p.invoiceId)||{};
+  EX.confirmAction('Delete this payment record?', `${EX.fmtMoney(p.amountClaimed)} against ${EX.esc(inv.invoiceNumber||'an invoice')} (${EX.esc(p.status)}). The invoice's balance and status are recalculated. This cannot be undone.`, async ()=>{
+    try{ await EX.remove('payments', id); if(p.invoiceId && EX.byId('invoices', p.invoiceId)){ const iv = EX.byId('invoices', p.invoiceId); if(iv.status==='Paid'||iv.status==='Partially Paid'||iv.status==='Under Verification') await EX.patch('invoices', p.invoiceId, {status:'Due'}); await EX.recomputeInvoiceStatus(p.invoiceId); } }catch(e){ return; }
+    await EX.addAudit('Payment record deleted','payments',id,{amountClaimed:p.amountClaimed,status:p.status,invoiceId:p.invoiceId,receiptNumber:p.receiptNumber},null);
+    EX.toast('Payment deleted','good');
+  }, true);
 };
 EX.receiptText = function(p){
   const client = EX.byId('clients', p.clientId); const inv = EX.byId('invoices', p.invoiceId);
@@ -4105,57 +4192,169 @@ EX.views['finance'] = function(){
 };
 
 /* ================= VENDORS & EXPENSES ================= */
+// Everyone who can open the finance pages (Super Admin / MD and Accountant) can enter, edit and delete expenses, vendors,
+// vendor bills / payments, bank accounts and client payment records.
+EX.canManageFinance = ()=> ['super_admin','accounts'].includes(EX.currentRole());
+EX.finGuard = ()=>{ if(!EX.canManageFinance()){ EX.toast('You do not have permission to change finance records.','bad'); return false; } return true; };
+EX.rowActions = (editJs, delJs, extra)=> EX.canManageFinance()? `<div class="flex gap-1 justify-end">${extra||''}<button title="Edit" onclick="event.stopPropagation();${editJs}" class="ex-btn ex-btn-ghost ex-btn-sm !p-1.5">${EX.icon('edit','w-3.5 h-3.5')}</button><button title="Delete" onclick="event.stopPropagation();${delJs}" class="ex-btn ex-btn-ghost ex-btn-sm !p-1.5" style="color:var(--ex-bad)">${EX.icon('trash','w-3.5 h-3.5')}</button></div>` : '';
 EX.views['vendors'] = function(){
   const tab = EX.ui.vendorTab||'expenses';
-  return `${EX.pageHead('Vendors & Expenses','', `${tab==='expenses'?`<button onclick="EX.showExpenseModal()" class="ex-btn ex-btn-primary">${EX.icon('plus','w-4 h-4')} New expense</button>`:`<button onclick="EX.showVendorModal()" class="ex-btn ex-btn-primary">${EX.icon('plus','w-4 h-4')} New vendor</button>`}`)}
+  const can = EX.canManageFinance();
+  return `${EX.pageHead('Vendors & Expenses','', can? (tab==='expenses'?`<button onclick="EX.showExpenseModal()" class="ex-btn ex-btn-primary">${EX.icon('plus','w-4 h-4')} New expense</button>`:`<button onclick="EX.showVendorInvoiceModal()" class="ex-btn ex-btn-ghost">${EX.icon('plus','w-4 h-4')} Add vendor bill</button><button onclick="EX.showVendorModal()" class="ex-btn ex-btn-primary">${EX.icon('plus','w-4 h-4')} New vendor</button>`) : '')}
   <div class="flex gap-1 mb-4 border-b" style="border-color:var(--ex-line)">
     ${[['expenses','Expenses'],['vendors','Vendors & Bills']].map(([k,l])=>`<button onclick="EX.ui.vendorTab='${k}';EX.scheduleRender()" class="px-3 py-2 text-sm font-medium border-b-2 -mb-px" style="border-color:${tab===k?'var(--ex-blue-600)':'transparent'};color:${tab===k?'var(--ex-blue-600)':'var(--ex-ink-soft)'}">${l}</button>`).join('')}
   </div>
-  ${tab==='expenses'? EX.dataTable({id:'expTable', rows:EX.get('expenses').sort((a,b)=>(b.date||0)-(a.date||0)), searchKey:e=>`${e.category} ${e.description}`, filterOptions:EX.EXPENSE_CATEGORIES, filterKey:e=>e.category, filterLabel:'category',
-    columns:[{label:'Date',get:e=>EX.fmtDate(e.date)},{label:'Category',get:e=>e.category},{label:'Description',get:e=>e.description||'—'},{label:'Amount',get:e=>EX.fmtMoney(e.amount)}], emptyLabel:'No expenses logged'}) :
-  EX.dataTable({id:'vendTable', rows:EX.get('vendors'), searchKey:v=>v.name, columns:[{label:'Vendor',get:v=>v.name},{label:'Service',get:v=>v.service||'—'},
-    {label:'Outstanding bills',get:v=>{const bills=EX.get('vendorInvoices').filter(b=>b.vendorId===v.id && b.status!=='Paid'); return bills.length? EX.fmtMoney(bills.reduce((s,b)=>s+b.amount,0)) : '₹0';}},
-    {label:'Actions',get:v=>`<button onclick="EX.showVendorInvoiceModal('${v.id}')" class="ex-btn ex-btn-ghost ex-btn-sm">Add bill</button>`}], emptyLabel:'No vendors yet'})}
-  ${tab==='vendors'? `<div class="mt-4 ex-card p-4"><div class="font-semibold text-sm mb-2">Vendor bills</div>
-    ${EX.dataTable({id:'vendorInvTable', rows:EX.get('vendorInvoices').map(b=>Object.assign({},b,{vendorName:(EX.get('vendors').find(v=>v.id===b.vendorId)||{}).name})), searchKey:b=>b.vendorName, filterOptions:['Pending','Paid'], filterKey:b=>b.status, filterLabel:'status',
-      columns:[{label:'Vendor',get:b=>b.vendorName},{label:'Amount',get:b=>EX.fmtMoney(b.amount)},{label:'Due',get:b=>EX.fmtDate(b.dueDate)},
-      {label:'Status',get:b=>`<select onchange="EX.patch('vendorInvoices','${b.id}',{status:this.value}).then(()=>EX.toast('Updated','good'))" class="ex-select !w-auto !py-1 text-xs"><option ${b.status==='Pending'?'selected':''}>Pending</option><option ${b.status==='Paid'?'selected':''}>Paid</option></select>`}], emptyLabel:'No bills yet'})}</div>` : ''}`;
+  ${tab==='expenses'? EX.dataTable({id:'expTable', rows:EX.get('expenses').slice().sort((a,b)=>(b.date||0)-(a.date||0)), searchKey:e=>`${e.category} ${e.description}`, filterOptions:EX.EXPENSE_CATEGORIES, filterKey:e=>e.category, filterLabel:'category',
+    columns:[{label:'Date',get:e=>EX.fmtDate(e.date)},{label:'Category',get:e=>EX.esc(e.category)},{label:'Description',get:e=>EX.esc(e.description||'—')},{label:'Amount',get:e=>EX.fmtMoney(e.amount)}].concat(can?[{label:'',get:e=>EX.rowActions(`EX.showExpenseModal('${e.id}')`,`EX.deleteExpense('${e.id}')`)}]:[]), emptyLabel:'No expenses logged'}) :
+  EX.dataTable({id:'vendTable', rows:EX.get('vendors'), searchKey:v=>`${v.name} ${v.service||''}`, columns:[{label:'Vendor',get:v=>`<div class="font-medium">${EX.esc(v.name)}</div>${v.phone||v.email?`<div class="text-xs" style="color:var(--ex-ink-soft)">${EX.esc([v.phone,v.email].filter(Boolean).join(' · '))}</div>`:''}`},{label:'Type',get:v=>EX.esc(v.type||'—')},{label:'Service',get:v=>EX.esc(v.service||'—')},
+    {label:'Outstanding bills',get:v=>{const bills=EX.get('vendorInvoices').filter(b=>b.vendorId===v.id && b.status!=='Paid'); return EX.fmtMoney(bills.reduce((s,b)=>s+(Number(b.amount)||0),0));}}].concat(can?[{label:'',get:v=>EX.rowActions(`EX.showVendorModal('${v.id}')`,`EX.deleteVendor('${v.id}')`,`<button onclick="event.stopPropagation();EX.showVendorInvoiceModal('${v.id}')" class="ex-btn ex-btn-ghost ex-btn-sm">Add bill</button>`)}]:[]), emptyLabel:'No vendors yet'})}
+  ${tab==='vendors'? `<div class="mt-4 ex-card p-4"><div class="font-semibold text-sm mb-2">Vendor bills & payments</div>
+    ${EX.dataTable({id:'vendorInvTable', rows:EX.get('vendorInvoices').map(b=>Object.assign({},b,{vendorName:(EX.get('vendors').find(v=>v.id===b.vendorId)||{}).name||'(deleted vendor)'})), searchKey:b=>`${b.vendorName} ${b.description||''} ${b.billNumber||''}`, filterOptions:['Pending','Paid'], filterKey:b=>b.status, filterLabel:'status',
+      columns:[{label:'Vendor',get:b=>EX.esc(b.vendorName)},{label:'Bill / description',get:b=>EX.esc([b.billNumber,b.description].filter(Boolean).join(' — ')||'—')},{label:'Amount',get:b=>EX.fmtMoney(b.amount)},{label:'Due',get:b=>EX.fmtDate(b.dueDate)},
+      {label:'Status',get:b=>b.status==='Paid'?`<span class="ex-pill ex-pill-good">Paid</span><div class="text-[11px]" style="color:var(--ex-ink-soft)">${EX.fmtDate(b.paidAt)}${b.paymentMethod?' · '+EX.esc(b.paymentMethod):''}${b.paymentRef?' · '+EX.esc(b.paymentRef):''}</div>`:'<span class="ex-pill ex-pill-warn">Pending</span>'}].concat(can?[{label:'',get:b=>EX.rowActions(`EX.showVendorInvoiceModal(null,'${b.id}')`,`EX.deleteVendorBill('${b.id}')`, b.status==='Paid'?`<button onclick="event.stopPropagation();EX.undoVendorBillPaid('${b.id}')" class="ex-btn ex-btn-ghost ex-btn-sm">Undo payment</button>`:`<button onclick="event.stopPropagation();EX.vendorPayModal('${b.id}')" class="ex-btn ex-btn-primary ex-btn-sm">Record payment</button>`)}]:[]), emptyLabel:'No bills yet'})}</div>` : ''}`;
 };
-EX.showExpenseModal = function(){
-  EX.openModal(`${EX.modalHeader('Log expense')}
-    <form onsubmit="EX.saveExpense(event)" class="p-5 space-y-3">
-      ${EX.formGrid([{key:'category',label:'Category',type:'select',options:EX.EXPENSE_CATEGORIES,required:true},{key:'amount',label:'Amount',type:'number',required:true},{key:'date',label:'Date',type:'date',required:true},{key:'description',label:'Description',full:true}],{date:EX.now()},2)}
+/* ---- expenses ---- */
+EX.showExpenseModal = function(id){
+  if(!EX.finGuard()) return;
+  const ex = id? EX.byId('expenses', id) : null;
+  EX.openModal(`${EX.modalHeader(ex?'Edit expense':'Log expense', ex&&ex.payrollKey?'This expense was created automatically when a salary / vendor bill was marked paid. Changing it changes your books but not the payment status.':'')}
+    <form onsubmit="EX.saveExpense(event${ex?`,'${id}'`:''})" class="p-5 space-y-3">
+      ${EX.formGrid([{key:'category',label:'Category',type:'select',options:EX.EXPENSE_CATEGORIES,required:true},{key:'amount',label:'Amount',type:'number',required:true},{key:'date',label:'Date',type:'date',required:true},{key:'description',label:'Description',full:true}],ex||{date:EX.now()},2)}
       <div class="flex justify-end gap-2"><button type="button" class="ex-btn ex-btn-ghost" onclick="EX.closeModal()">Cancel</button><button class="ex-btn ex-btn-primary">Save</button></div>
     </form>`);
 };
-EX.saveExpense = async function(ev){
-  ev.preventDefault();
+EX.saveExpense = async function(ev, id){
+  ev.preventDefault(); if(!EX.finGuard()) return;
   const data = EX.readForm(ev.target,[{key:'category'},{key:'amount',type:'number'},{key:'date',type:'date'},{key:'description'}]);
-  const id = await EX.add('expenses', data);
-  await EX.addAudit('Expense logged','expenses',id,null,data);
-  EX.closeModal(); EX.toast('Expense logged','good');
+  try{
+    if(id){ const before = EX.byId('expenses', id); await EX.patch('expenses', id, data); await EX.addAudit('Expense edited','expenses',id,{category:before.category,amount:before.amount,date:before.date,description:before.description},data); }
+    else { const nid = await EX.add('expenses', data); await EX.addAudit('Expense logged','expenses',nid,null,data); }
+  }catch(e){ return; }
+  EX.closeModal(); EX.toast(id?'Expense updated':'Expense logged','good');
 };
-EX.showVendorModal = function(){
-  EX.openModal(`${EX.modalHeader('Add vendor / affiliate')}
-    <form onsubmit="EX.saveVendor(event)" class="p-5 space-y-3">
-      ${EX.formGrid([{key:'name',label:'Name',required:true},{key:'service',label:'Service provided'},{key:'type',label:'Type',type:'select',options:['Vendor','Affiliate','Freelancer']}],{},2)}
+EX.deleteExpense = function(id){
+  if(!EX.finGuard()) return;
+  const e = EX.byId('expenses', id); if(!e) return;
+  EX.confirmAction('Delete this expense?', `${EX.esc(e.category)} — ${EX.fmtMoney(e.amount)} (${EX.fmtDate(e.date)}${e.description?', '+EX.esc(e.description):''}).${e.payrollKey?' <br><b>It was created by a salary / vendor payment — deleting it makes that payment show as unpaid for salaries.</b>':''} This cannot be undone.`, async ()=>{
+    try{ await EX.remove('expenses', id); }catch(err){ return; }
+    await EX.addAudit('Expense deleted','expenses',id,{category:e.category,amount:e.amount,description:e.description},null);
+    EX.toast('Expense deleted','good');
+  }, true);
+};
+/* ---- vendors ---- */
+EX.showVendorModal = function(id){
+  if(!EX.finGuard()) return;
+  const v = id? EX.byId('vendors', id) : null;
+  EX.openModal(`${EX.modalHeader(v?'Edit vendor':'Add vendor / affiliate')}
+    <form onsubmit="EX.saveVendor(event${v?`,'${id}'`:''})" class="p-5 space-y-3">
+      ${EX.formGrid([{key:'name',label:'Name',required:true},{key:'service',label:'Service provided'},{key:'type',label:'Type',type:'select',options:['Vendor','Affiliate','Freelancer']},{key:'phone',label:'Phone'},{key:'email',label:'Email',type:'email'},{key:'notes',label:'Notes',full:true}],v||{},2)}
       <div class="flex justify-end gap-2"><button type="button" class="ex-btn ex-btn-ghost" onclick="EX.closeModal()">Cancel</button><button class="ex-btn ex-btn-primary">Save</button></div>
     </form>`);
 };
-EX.saveVendor = async function(ev){ ev.preventDefault(); const data = EX.readForm(ev.target,[{key:'name'},{key:'service'},{key:'type'}]); await EX.add('vendors', data); EX.closeModal(); EX.toast('Vendor added','good'); };
-EX.showVendorInvoiceModal = function(vendorId){
-  EX.openModal(`${EX.modalHeader('Add vendor bill')}
-    <form onsubmit="EX.saveVendorInvoice(event,'${vendorId}')" class="p-5 space-y-3">
-      ${EX.formGrid([{key:'amount',label:'Amount',type:'number',required:true},{key:'dueDate',label:'Due date',type:'date'}],{},2)}
+EX.saveVendor = async function(ev, id){
+  ev.preventDefault(); if(!EX.finGuard()) return;
+  const data = EX.readForm(ev.target,[{key:'name'},{key:'service'},{key:'type'},{key:'phone'},{key:'email'},{key:'notes'}]);
+  try{
+    if(id){ const before = EX.byId('vendors', id); await EX.patch('vendors', id, data); await EX.addAudit('Vendor edited','vendors',id,{name:before.name,service:before.service,type:before.type},data); }
+    else { const nid = await EX.add('vendors', data); await EX.addAudit('Vendor added','vendors',nid,null,data); }
+  }catch(e){ return; }
+  EX.closeModal(); EX.toast(id?'Vendor updated':'Vendor added','good');
+};
+EX.deleteVendor = function(id){
+  if(!EX.finGuard()) return;
+  const v = EX.byId('vendors', id); if(!v) return;
+  const bills = EX.get('vendorInvoices').filter(b=>b.vendorId===id);
+  EX.confirmAction('Delete vendor '+EX.esc(v.name)+'?', `${bills.length?`This also deletes its <b>${bills.length}</b> bill${bills.length>1?'s':''} (${bills.filter(b=>b.status!=='Paid').length} unpaid). Expenses already logged for paid bills stay in your books.`:'It has no bills.'} This cannot be undone.`, async ()=>{
+    try{ for(const b of bills) await EX.remove('vendorInvoices', b.id); await EX.remove('vendors', id); }catch(e){ return; }
+    await EX.addAudit('Vendor deleted','vendors',id,{name:v.name,service:v.service,billsRemoved:bills.length},null);
+    EX.toast('Vendor deleted','good');
+  }, true);
+};
+/* ---- vendor bills & payments ---- */
+EX.showVendorInvoiceModal = function(vendorId, billId){
+  if(!EX.finGuard()) return;
+  const vendors = EX.get('vendors').slice().sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+  if(!vendors.length){ EX.toast('Add a vendor first.','bad'); return; }
+  const b = billId? EX.byId('vendorInvoices', billId) : null;
+  if(b) vendorId = b.vendorId;
+  EX.openModal(`${EX.modalHeader(b?'Edit vendor bill':'Add vendor bill', b&&b.status==='Paid'?'This bill is already paid — changing the amount also updates the Vendor expense that was logged for it.':'')}
+    <form onsubmit="EX.saveVendorInvoice(event${b?`,null,'${billId}'`:`,'${vendorId||''}'`})" class="p-5 space-y-3">
+      ${EX.formGrid([{key:'vendorId',label:'Vendor',type:'select',required:true,options:vendors.map(v=>({value:v.id,label:v.name}))},{key:'amount',label:'Amount',type:'number',required:true},{key:'dueDate',label:'Due date',type:'date'},{key:'billNumber',label:'Bill / invoice number'},{key:'description',label:'Description',full:true}],Object.assign({vendorId:vendorId||vendors[0].id},b||{}),2)}
       <div class="flex justify-end gap-2"><button type="button" class="ex-btn ex-btn-ghost" onclick="EX.closeModal()">Cancel</button><button class="ex-btn ex-btn-primary">Save</button></div>
     </form>`);
 };
-EX.saveVendorInvoice = async function(ev,vendorId){
-  ev.preventDefault();
-  const data = EX.readForm(ev.target,[{key:'amount',type:'number'},{key:'dueDate',type:'date'}]);
-  data.vendorId = vendorId; data.status='Pending';
-  await EX.add('vendorInvoices', data);
-  EX.closeModal(); EX.toast('Bill added','good');
+EX.saveVendorInvoice = async function(ev, vendorId, billId){
+  ev.preventDefault(); if(!EX.finGuard()) return;
+  const data = EX.readForm(ev.target,[{key:'vendorId'},{key:'amount',type:'number'},{key:'dueDate',type:'date'},{key:'billNumber'},{key:'description'}]);
+  if(!data.vendorId && vendorId) data.vendorId = vendorId;
+  if(!EX.byId('vendors', data.vendorId)){ EX.toast('Please choose a vendor.','bad'); return; }
+  try{
+    if(billId){
+      const before = EX.byId('vendorInvoices', billId);
+      await EX.patch('vendorInvoices', billId, data);
+      if(before.status==='Paid'){ const exp = EX.payrollExpense('vendorbill|'+billId); if(exp && Number(exp.amount)!==Number(data.amount)) await EX.patch('expenses', exp.id, {amount:Number(data.amount)||0}); }
+      await EX.addAudit('Vendor bill edited','vendorInvoices',billId,{amount:before.amount,dueDate:before.dueDate,vendorId:before.vendorId},data);
+    } else {
+      data.status='Pending';
+      const nid = await EX.add('vendorInvoices', data);
+      await EX.addAudit('Vendor bill added','vendorInvoices',nid,null,data);
+    }
+  }catch(e){ return; }
+  EX.closeModal(); EX.toast(billId?'Bill updated':'Bill added','good');
+};
+EX.vendorPayModal = function(billId){
+  if(!EX.finGuard()) return;
+  const b = EX.byId('vendorInvoices', billId); if(!b) return;
+  const v = EX.byId('vendors', b.vendorId)||{};
+  EX.openModal(`${EX.modalHeader('Record payment to '+EX.esc(v.name||'vendor'), EX.fmtMoney(b.amount)+(b.billNumber?' · '+EX.esc(b.billNumber):''))}
+    <form onsubmit="EX.saveVendorPayment(event,'${billId}')" class="p-5 space-y-3">
+      ${EX.formGrid([{key:'paidAt',label:'Date paid',type:'date',required:true},{key:'paymentMethod',label:'Method',type:'select',options:['Bank Transfer','UPI','Cash','Cheque','Card']},{key:'paymentRef',label:'Reference / transaction ID',full:true}],{paidAt:EX.now(),paymentMethod:'Bank Transfer'},2)}
+      <div class="text-xs" style="color:var(--ex-ink-soft)">This marks the bill Paid and logs a Vendor expense for ${EX.fmtMoney(b.amount)}.</div>
+      <div class="flex justify-end gap-2"><button type="button" class="ex-btn ex-btn-ghost" onclick="EX.closeModal()">Cancel</button><button class="ex-btn ex-btn-primary">Record payment</button></div>
+    </form>`);
+};
+EX.payVendorBill = async function(billId, info){
+  info = info||{};
+  const b = EX.byId('vendorInvoices', billId); if(!b || b.status==='Paid') return false;
+  const v = EX.get('vendors').find(x=>x.id===b.vendorId)||{};
+  const key = 'vendorbill|'+billId;
+  const when = info.paidAt || EX.now();
+  await EX.patch('vendorInvoices', billId, {status:'Paid', paidAt:when, paymentMethod:info.paymentMethod||null, paymentRef:info.paymentRef||null});
+  let id = null;
+  if(!EX.payrollExpense(key)) id = await EX.add('expenses', {category:'Vendor', amount:Number(b.amount)||0, date:when, description:`Vendor payment - ${v.name||''}${info.paymentRef?' ('+info.paymentRef+')':''}`, payrollKey:key});
+  await EX.addAudit('Vendor bill marked paid','vendorInvoices',billId,{status:b.status},{status:'Paid',expenseId:id,paymentRef:info.paymentRef||null});
+  return true;
+};
+EX.saveVendorPayment = async function(ev, billId){
+  ev.preventDefault(); if(!EX.finGuard()) return;
+  const d = EX.readForm(ev.target,[{key:'paidAt',type:'date'},{key:'paymentMethod'},{key:'paymentRef'}]);
+  try{ await EX.payVendorBill(billId, d); }catch(e){ return; }
+  EX.closeModal(); EX.toast('Payment recorded','good');
+};
+EX.undoVendorBillPaid = function(billId){
+  if(!EX.finGuard()) return;
+  const b = EX.byId('vendorInvoices', billId); if(!b) return;
+  EX.confirmAction('Undo this payment?', 'The bill goes back to Pending and the Vendor expense logged for it is removed.', async ()=>{
+    try{
+      await EX.patch('vendorInvoices', billId, {status:'Pending', paidAt:null, paymentMethod:null, paymentRef:null});
+      const exp = EX.payrollExpense('vendorbill|'+billId); if(exp) await EX.remove('expenses', exp.id);
+    }catch(e){ return; }
+    await EX.addAudit('Vendor payment undone','vendorInvoices',billId,{status:'Paid'},{status:'Pending'});
+    EX.toast('Payment undone','good');
+  }, true);
+};
+EX.deleteVendorBill = function(billId){
+  if(!EX.finGuard()) return;
+  const b = EX.byId('vendorInvoices', billId); if(!b) return;
+  const v = EX.byId('vendors', b.vendorId)||{};
+  EX.confirmAction('Delete this vendor bill?', `${EX.esc(v.name||'Vendor')} — ${EX.fmtMoney(b.amount)}.${b.status==='Paid'?' It is marked paid, so the Vendor expense logged for it will be removed too.':''} This cannot be undone.`, async ()=>{
+    try{
+      const exp = EX.payrollExpense('vendorbill|'+billId); if(exp) await EX.remove('expenses', exp.id);
+      await EX.remove('vendorInvoices', billId);
+    }catch(e){ return; }
+    await EX.addAudit('Vendor bill deleted','vendorInvoices',billId,{vendorId:b.vendorId,amount:b.amount,status:b.status},null);
+    EX.toast('Bill deleted','good');
+  }, true);
 };
 
 /* ================= MONTH-END PAYABLES (salaries + vendors) ================= */
@@ -4229,12 +4428,7 @@ EX.markVendorBillPaid = function(billId){
   const b = EX.byId('vendorInvoices', billId); if(!b || b.status==='Paid') return;
   const v = EX.get('vendors').find(x=>x.id===b.vendorId)||{};
   EX.confirmAction('Mark vendor bill paid?', `${EX.esc(v.name||'Vendor')} — ${EX.fmtMoney(b.amount)}. This also logs a Vendor expense.`, async ()=>{
-    const key = 'vendorbill|'+billId;
-    await EX.patch('vendorInvoices', billId, {status:'Paid', paidAt:EX.now()});
-    if(!EX.payrollExpense(key)){
-      const id = await EX.add('expenses', {category:'Vendor', amount:Number(b.amount)||0, date:EX.now(), description:`Vendor payment - ${v.name||''}`, payrollKey:key});
-      await EX.addAudit('Vendor bill marked paid','vendorInvoices',billId,{status:b.status},{status:'Paid',expenseId:id});
-    }
+    try{ await EX.payVendorBill(billId, {paidAt:EX.now()}); }catch(e){ return; }
     EX.toast('Vendor bill marked paid','good');
   });
 };
@@ -4255,7 +4449,7 @@ EX.downloadPayablesPdf = async function(ym){
 EX.views['bank'] = function(){
   const accounts = EX.get('bankAccounts');
   const personalReceipts = EX.get('payments').filter(p=>p.method==='Personal Account');
-  return `${EX.pageHead('Bank Accounts', '', `<button onclick="EX.showBankModal()" class="ex-btn ex-btn-primary">${EX.icon('plus','w-4 h-4')} Add account</button>`)}
+  return `${EX.pageHead('Bank Accounts', '', EX.canManageFinance()?`<button onclick="EX.showBankModal()" class="ex-btn ex-btn-primary">${EX.icon('plus','w-4 h-4')} Add account</button>`:'')}
   <div class="ex-card p-3 mb-4 text-xs flex items-start gap-2" style="background:var(--ex-blue-50);color:var(--ex-ink-soft)">
     ${EX.icon('info','w-3.5 h-3.5 shrink-0 mt-0.5')}
     <div>These balances are <strong>not</strong> a live bank feed — there is no real-time bank integration connected. Every deposit and withdrawal shown here was manually logged by a team member using "Add transaction" below, so a balance is only as current as the last person who entered a transaction. For your bank's actual real-time balance, check your bank's own app or portal.</div>
@@ -4265,10 +4459,10 @@ EX.views['bank'] = function(){
       const txns = a.transactions||[];
       const balance = (a.openingBalance||0) + txns.reduce((s,t)=> s + (t.type==='Deposit'?t.amount:-t.amount), 0);
       return `<div class="ex-card p-4">
-        <div class="flex items-center justify-between mb-1"><div class="font-semibold text-sm">${a.bankName} — ${a.accountLabel}</div><span class="ex-pill ex-pill-neutral">${a.currency}</span></div>
+        <div class="flex items-center justify-between mb-1 gap-2"><div class="font-semibold text-sm">${EX.esc(a.bankName)} — ${EX.esc(a.accountLabel)}</div><div class="flex items-center gap-1"><span class="ex-pill ex-pill-neutral">${a.currency}</span>${EX.rowActions(`EX.showBankModal('${a.id}')`,`EX.deleteBank('${a.id}')`)}</div></div>
         <div class="font-display text-2xl font-bold tnum mb-2">${EX.fmtMoney(balance,a.currency)}</div>
-        <button onclick="EX.showTxnModal('${a.id}')" class="ex-btn ex-btn-ghost ex-btn-sm">${EX.icon('plus','w-3.5 h-3.5')} Add transaction</button>
-        <div class="mt-2 text-xs space-y-1 max-h-28 overflow-y-auto">${txns.slice().reverse().slice(0,6).map(t=>`<div class="flex justify-between"><span style="color:var(--ex-ink-soft)">${EX.fmtDate(t.date)} ${t.note||''}</span><span class="tnum" style="color:${t.type==='Deposit'?'var(--ex-good)':'var(--ex-bad)'}">${t.type==='Deposit'?'+':'-'}${EX.fmtMoney(t.amount,a.currency)}</span></div>`).join('')}</div>
+        ${EX.canManageFinance()?`<button onclick="EX.showTxnModal('${a.id}')" class="ex-btn ex-btn-ghost ex-btn-sm">${EX.icon('plus','w-3.5 h-3.5')} Add transaction</button>`:''}
+        <div class="mt-2 text-xs space-y-1 max-h-40 overflow-y-auto">${txns.map((t,i)=>({t,i})).reverse().map(({t,i})=>`<div class="flex justify-between items-center gap-2"><span style="color:var(--ex-ink-soft)">${EX.fmtDate(t.date)} ${EX.esc(t.note||'')}</span><span class="flex items-center gap-1"><span class="tnum" style="color:${t.type==='Deposit'?'var(--ex-good)':'var(--ex-bad)'}">${t.type==='Deposit'?'+':'-'}${EX.fmtMoney(t.amount,a.currency)}</span>${EX.rowActions(`EX.showTxnModal('${a.id}',${i})`,`EX.deleteTxn('${a.id}',${i})`)}</span></div>`).join('')}</div>
       </div>`;
     }).join('') : `<div class="col-span-2 ex-card p-6">${EX.empty('No bank accounts added yet')}</div>`}
   </div>
@@ -4278,28 +4472,62 @@ EX.views['bank'] = function(){
     ${personalReceipts.length? `<table class="ex-table"><thead><tr><th>Client</th><th>Amount</th><th>Ref</th><th>Status</th></tr></thead><tbody>${personalReceipts.map(p=>`<tr><td>${(EX.byId('clients',p.clientId)||{}).companyName||'—'}</td><td class="tnum">${EX.fmtMoney(p.amountClaimed)}</td><td>${p.transactionRef||'—'}</td><td>${EX.pill(p.status)}</td></tr>`).join('')}</tbody></table>` : EX.empty('None recorded')}
   </div>`;
 };
-EX.showBankModal = function(){
-  EX.openModal(`${EX.modalHeader('Add bank account')}
-    <form onsubmit="EX.saveBank(event)" class="p-5 space-y-3">
-      ${EX.formGrid([{key:'bankName',label:'Bank',required:true},{key:'accountLabel',label:'Account label',required:true},{key:'currency',label:'Currency',type:'select',options:Object.keys(EX.CURRENCIES)},{key:'openingBalance',label:'Opening balance',type:'number'}],{},2)}
+EX.showBankModal = function(id){
+  if(!EX.finGuard()) return;
+  const a = id? EX.byId('bankAccounts', id) : null;
+  EX.openModal(`${EX.modalHeader(a?'Edit bank account':'Add bank account')}
+    <form onsubmit="EX.saveBank(event${a?`,'${id}'`:''})" class="p-5 space-y-3">
+      ${EX.formGrid([{key:'bankName',label:'Bank',required:true},{key:'accountLabel',label:'Account label',required:true},{key:'currency',label:'Currency',type:'select',options:Object.keys(EX.CURRENCIES)},{key:'openingBalance',label:'Opening balance',type:'number'}],a||{},2)}
       <div class="flex justify-end gap-2"><button type="button" class="ex-btn ex-btn-ghost" onclick="EX.closeModal()">Cancel</button><button class="ex-btn ex-btn-primary">Save</button></div>
     </form>`);
 };
-EX.saveBank = async function(ev){ ev.preventDefault(); const data = EX.readForm(ev.target,[{key:'bankName'},{key:'accountLabel'},{key:'currency'},{key:'openingBalance',type:'number'}]); data.transactions=[]; await EX.add('bankAccounts', data); EX.closeModal(); EX.toast('Account added','good'); };
-EX.showTxnModal = function(accountId){
-  EX.openModal(`${EX.modalHeader('Add transaction')}
-    <form onsubmit="EX.saveTxn(event,'${accountId}')" class="p-5 space-y-3">
-      ${EX.formGrid([{key:'type',label:'Type',type:'select',options:['Deposit','Withdrawal']},{key:'amount',label:'Amount',type:'number',required:true},{key:'date',label:'Date',type:'date'},{key:'note',label:'Note'}],{date:EX.now()},2)}
+EX.saveBank = async function(ev, id){
+  ev.preventDefault(); if(!EX.finGuard()) return;
+  const data = EX.readForm(ev.target,[{key:'bankName'},{key:'accountLabel'},{key:'currency'},{key:'openingBalance',type:'number'}]);
+  try{
+    if(id){ const before = EX.byId('bankAccounts', id); await EX.patch('bankAccounts', id, data); await EX.addAudit('Bank account edited','bankAccounts',id,{bankName:before.bankName,accountLabel:before.accountLabel,openingBalance:before.openingBalance},data); }
+    else { data.transactions=[]; const nid = await EX.add('bankAccounts', data); await EX.addAudit('Bank account added','bankAccounts',nid,null,{bankName:data.bankName,accountLabel:data.accountLabel}); }
+  }catch(e){ return; }
+  EX.closeModal(); EX.toast(id?'Account updated':'Account added','good');
+};
+EX.deleteBank = function(id){
+  if(!EX.finGuard()) return;
+  const a = EX.byId('bankAccounts', id); if(!a) return;
+  EX.confirmAction('Delete bank account?', `${EX.esc(a.bankName)} — ${EX.esc(a.accountLabel)} and its ${(a.transactions||[]).length} logged transaction(s). This cannot be undone.`, async ()=>{
+    try{ await EX.remove('bankAccounts', id); }catch(e){ return; }
+    await EX.addAudit('Bank account deleted','bankAccounts',id,{bankName:a.bankName,accountLabel:a.accountLabel,transactions:(a.transactions||[]).length},null);
+    EX.toast('Account deleted','good');
+  }, true);
+};
+EX.showTxnModal = function(accountId, idx){
+  if(!EX.finGuard()) return;
+  const a = EX.byId('bankAccounts', accountId); if(!a) return;
+  const t = (idx!==undefined && idx!==null)? (a.transactions||[])[idx] : null;
+  EX.openModal(`${EX.modalHeader(t?'Edit transaction':'Add transaction')}
+    <form onsubmit="EX.saveTxn(event,'${accountId}'${t?`,${idx}`:''})" class="p-5 space-y-3">
+      ${EX.formGrid([{key:'type',label:'Type',type:'select',options:['Deposit','Withdrawal']},{key:'amount',label:'Amount',type:'number',required:true},{key:'date',label:'Date',type:'date'},{key:'note',label:'Note'}],t||{date:EX.now()},2)}
       <div class="flex justify-end gap-2"><button type="button" class="ex-btn ex-btn-ghost" onclick="EX.closeModal()">Cancel</button><button class="ex-btn ex-btn-primary">Save</button></div>
     </form>`);
 };
-EX.saveTxn = async function(ev, accountId){
-  ev.preventDefault();
+EX.saveTxn = async function(ev, accountId, idx){
+  ev.preventDefault(); if(!EX.finGuard()) return;
   const data = EX.readForm(ev.target,[{key:'type'},{key:'amount',type:'number'},{key:'date',type:'date'},{key:'note'}]);
-  const a = EX.byId('bankAccounts', accountId);
-  const transactions = (a.transactions||[]).concat([data]);
-  await EX.patch('bankAccounts', accountId, {transactions});
-  EX.closeModal(); EX.toast('Transaction added','good');
+  const a = EX.byId('bankAccounts', accountId); if(!a) return;
+  const transactions = (a.transactions||[]).slice();
+  if(idx!==undefined && idx!==null) transactions[idx] = data; else transactions.push(data);
+  try{ await EX.patch('bankAccounts', accountId, {transactions}); }catch(e){ return; }
+  await EX.addAudit(idx!==undefined&&idx!==null?'Bank transaction edited':'Bank transaction added','bankAccounts',accountId,null,data);
+  EX.closeModal(); EX.toast(idx!==undefined&&idx!==null?'Transaction updated':'Transaction added','good');
+};
+EX.deleteTxn = function(accountId, idx){
+  if(!EX.finGuard()) return;
+  const a = EX.byId('bankAccounts', accountId); const t = a && (a.transactions||[])[idx]; if(!t) return;
+  EX.confirmAction('Delete this transaction?', `${t.type} of ${EX.fmtMoney(t.amount,a.currency)} on ${EX.fmtDate(t.date)}${t.note?' ('+EX.esc(t.note)+')':''}. The account balance will change.`, async ()=>{
+    const transactions = (EX.byId('bankAccounts', accountId).transactions||[]).filter((_,k)=>k!==idx);
+    try{ await EX.patch('bankAccounts', accountId, {transactions}); }catch(e){ return; }
+    await EX.addAudit('Bank transaction deleted','bankAccounts',accountId,t,null);
+    EX.toast('Transaction deleted','good');
+  }, true);
 };
 /* ================= EMPLOYEES ================= */
 EX.EMP_FIELDS = [
@@ -4317,7 +4545,7 @@ EX.views['employees'] = function(param){
   if(param==='review') return EX.monthlyReviewDashboard();
   if(param) return EX.employeeDetail(param);
   const emps = EX.get('employees');
-  return `${EX.pageHead('Employees', `${emps.filter(e=>e.status==='Active').length} active · ${emps.filter(e=>e.status==='Removed').length} removed`, `
+  return `${EX.duplicateBanner()}${EX.pageHead('Employees', `${emps.filter(e=>e.status==='Active').length} active · ${emps.filter(e=>e.status==='Removed').length} removed`, `
     <button onclick="EX.route('employees','review')" class="ex-btn ex-btn-ghost">${EX.icon('bar-chart','w-4 h-4')} Monthly Review Dashboard</button>
     ${EX.canManageMembers()?`<button onclick="EX.showEmpModal()" class="ex-btn ex-btn-primary">${EX.icon('plus','w-4 h-4')} Add employee</button>`:''}`)}
   ${EX.dataTable({id:'empTable', rows:emps, searchKey:e=>`${e.name} ${e.role} ${e.department}`, filterOptions:['Active','On Leave','Removed'], filterKey:e=>e.status, filterLabel:'status',
@@ -4335,6 +4563,46 @@ EX.views['employees'] = function(param){
       </div>`},
     ], emptyLabel:'No employees yet'})}`;
 };
+/* ---- duplicate profiles (same email) — found and cleaned up by the Super Admin ---- */
+EX.duplicateGroups = function(){
+  const by = {};
+  EX.get('employees').forEach(e=>{ const k=(e.email||'').trim().toLowerCase(); if(k) (by[k]=by[k]||[]).push(e); });
+  return Object.values(by).filter(g=>g.length>1).map(g=>g.slice().sort((a,b)=>(a._createdAt||0)-(b._createdAt||0)));
+};
+EX.empRefCount = function(id){
+  const n = (col,f)=> EX.get(col).filter(x=>x[f]===id).length;
+  return n('tasks','assignedTo')+n('content','assignedTo')+n('leaveRequests','employeeId')+n('wfhRequests','employeeId')+n('companyAssets','assignedTo')+n('employees','managerId')
+    +n('videoShoots','videographer')+n('meetings','ownerId')+n('clients','assignedDme')+(EX.byId('attendance',id)?1:0)
+    +Object.keys(EX.byId('employees',id)||{}).filter(k=>k.indexOf('rec_')===0 && (EX.byId('employees',id)[k])).length;
+};
+EX.duplicateBanner = function(){
+  if(!EX.canManageMembers()) return '';
+  const g = EX.duplicateGroups(); if(!g.length) return '';
+  const extra = g.reduce((n,x)=>n+x.length-1,0);
+  return `<div class="rounded-xl p-3 mb-4 flex flex-wrap items-center justify-between gap-2 text-sm" style="background:var(--ex-warn-bg);color:var(--ex-warn)"><span><b>${extra} duplicate profile${extra>1?'s':''} found</b> — the same email appears on more than one employee record.</span><button onclick="EX.duplicatesModal()" class="ex-btn ex-btn-ghost ex-btn-sm">Review &amp; clean up</button></div>`;
+};
+EX.duplicatesModal = function(){
+  if(!EX.canManageMembers()){ EX.toast('Only the Super Admin can clean up duplicates.','bad'); return; }
+  const groups = EX.duplicateGroups();
+  EX.openModal(`${EX.modalHeader('Duplicate profiles', 'The oldest profile is kept. A duplicate can be removed only when no work, attendance or other records are linked to it.')}
+    <div class="p-5 max-h-[65vh] overflow-y-auto space-y-4">${groups.length? groups.map(g=>`<div class="ex-card p-3"><div class="text-xs mb-2" style="color:var(--ex-ink-soft)">${EX.esc(g[0].email||'')}</div>
+      ${g.map((e,i)=>{ const refs = EX.empRefCount(e.id); const isMe = e.id===EX.session.employeeId;
+        return `<div class="flex items-center justify-between gap-2 py-1.5 ${i?'border-t':''}" style="border-color:var(--ex-line-soft)"><div class="text-sm"><b>${EX.esc(e.name)}</b> · ${EX.esc((EX.ROLES[e.role]||{}).label||e.role)} · created ${EX.fmtDate(e._createdAt)} ${i===0?'<span class="ex-pill ex-pill-good">Keep (oldest)</span>':''}${isMe?' <span class="ex-pill ex-pill-info">You</span>':''}<div class="text-[11px]" style="color:var(--ex-ink-soft)">${refs} linked record${refs===1?'':'s'}</div></div>
+        ${i===0?'':(isMe? '<span class="text-xs" style="color:var(--ex-ink-soft)">Signed in as this one</span>' : (refs? '<span class="text-xs" style="color:var(--ex-warn)">Has linked records — change its email in Edit instead</span>' : `<button onclick="EX.removeDuplicateProfile('${e.id}')" class="ex-btn ex-btn-danger ex-btn-sm">Remove duplicate</button>`))}</div>`; }).join('')}</div>`).join('') : '<div class="text-sm" style="color:var(--ex-good)">No duplicates left.</div>'}</div>
+    <div class="flex justify-end p-4 border-t" style="border-color:var(--ex-line)"><button class="ex-btn ex-btn-ghost" onclick="EX.closeModal()">Close</button></div>`, {wide:true});
+};
+EX.removeDuplicateProfile = async function(id){
+  if(!EX.canManageMembers()){ EX.toast('Only the Super Admin can clean up duplicates.','bad'); return; }
+  const e = EX.byId('employees', id); if(!e) return;
+  const grp = EX.duplicateGroups().find(g=>g.some(x=>x.id===id));
+  if(!grp || grp[0].id===id){ EX.toast('That profile is the one being kept.','bad'); return; }
+  if(id===EX.session.employeeId){ EX.toast('You are signed in as this profile.','bad'); return; }
+  if(EX.empRefCount(id)>0){ EX.toast('This duplicate has linked records — change its email instead of deleting it.','bad'); return; }
+  try{ await EX.remove('employees', id); }catch(err){ return; }
+  await EX.addAudit('Removed duplicate employee profile','employees',id,{name:e.name,email:e.email,role:e.role},{keptId:grp[0].id});
+  EX.toast('Duplicate removed','good');
+  if(EX.duplicateGroups().length) EX.duplicatesModal(); else EX.closeModal();
+};
 EX.showEmpModal = function(id){
   const emp = id? EX.byId('employees', id) : null;
   if(!EX.canManageMembers() && !id){ EX.toast('Only the Super Admin can add members.','bad'); return; }
@@ -4348,6 +4616,11 @@ EX.saveEmployee = async function(ev, id){
   ev.preventDefault();
   const data = EX.readForm(ev.target, EX.EMP_FIELDS);
   if(!id && !EX.canManageMembers()){ EX.toast('Only the Super Admin can add members.','bad'); return; }
+  if(data.email!==undefined){
+    data.email = (data.email||'').trim();
+    const clash = EX.get('employees').find(e=>e.id!==id && (e.email||'').trim().toLowerCase()===data.email.toLowerCase());
+    if(clash){ EX.toast(`${clash.name} already uses ${data.email}. Each person must have a unique email.`,'bad'); return; }
+  }
   if(id && !EX.canManageMembers()){ const ex0 = EX.byId('employees', id); if(ex0) data.role = ex0.role; }   // others may update profile details, never roles
   // Only a Super Admin / MD may hand out (or change) Super Admin-level roles — Ops Head-level roles cannot promote anyone to it.
   if(EX.currentRole()!=='super_admin'){
