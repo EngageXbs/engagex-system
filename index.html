@@ -161,9 +161,11 @@ EX.canSeeRetainer  = ()=> EX.RETAINER_VIEW_ROLES.includes(EX.rawRole());
 EX.canEditRetainer = ()=> EX.RETAINER_EDIT_ROLES.includes(EX.rawRole());
 // Monthly committed deliverables (per client): same people may edit; everyone else is view-only.
 EX.canEditDeliverables = ()=> EX.RETAINER_EDIT_ROLES.includes(EX.rawRole());
-// Deleting / removing an employee: MD, Operations Head / CEO, Super Admin only.
-EX.EMP_DELETE_ROLES = ['super_admin','md','ops_head'];
-EX.canDeleteEmployee = ()=> EX.EMP_DELETE_ROLES.includes(EX.rawRole());
+// Adding, removing/deactivating, re-activating members, giving them logins, and handing out the Super Admin role:
+// Super Admin only (the MD is a Super Admin). Nobody else — not the Ops Head / CEO, DM Manager, Creative Head or HR.
+EX.MEMBER_ADMIN_ROLES = ['super_admin','md'];
+EX.canManageMembers = ()=> EX.MEMBER_ADMIN_ROLES.includes(EX.rawRole());
+EX.canDeleteEmployee = EX.canManageMembers;
 
 // Roles whose designated reports (managerId chain) form the "digital marketing" line:
 // DME's own interns are addressed as "Digital Marketing Intern" throughout, even though
@@ -1439,7 +1441,7 @@ EX.formField = function(f, value){
   const req = f.required?'required':'';
   let input;
   if(f.type==='select'){
-    input = `<select id="${id}" name="${f.key}" class="ex-select" ${req}>${(f.options||[]).map(o=>{
+    input = `<select id="${id}" name="${f.key}" class="ex-select" ${req} ${f.disabled?'disabled':''}>${(f.options||[]).map(o=>{
       const ov = typeof o==='object'?o.value:o; const ol = typeof o==='object'?o.label:o;
       return `<option value="${ov}" ${String(ov)===String(v)?'selected':''}>${ol}</option>`;
     }).join('')}</select>`;
@@ -1807,7 +1809,8 @@ EX.employeeMonthStats = function(empId, ym){
   const attendanceRate = Math.min(1, attended.size/expected);
   const revisionPenalty = Math.min(1, revisions/Math.max(1,tasks.length)/2);
   const score = Math.round((completionRate*40 + onTimeRate*30 + attendanceRate*20 + (1-revisionPenalty)*10));
-  return {ym, daysPresent, hoursWorked: Math.round(hoursWorked*10)/10, lateDays, leaveDays: leaveSet.size, wfhDays: wfhSet.size, eodDays, workingDays: working,
+  const escs = EX.empRecordsInMonth(EX.byId('employees', empId), ym, 'escalation'), achs = EX.empRecordsInMonth(EX.byId('employees', empId), ym, 'achievement');
+  return {escalations:escs.length, escalationsOpen:escs.filter(r=>r.status!=='Resolved').length, achievements:achs.length, ym, daysPresent, hoursWorked: Math.round(hoursWorked*10)/10, lateDays, leaveDays: leaveSet.size, wfhDays: wfhSet.size, eodDays, workingDays: working,
     tasksAssigned:tasks.length, tasksCompleted:completed.length, onTimeCompleted:onTime.length, revisions,
     completionRate, onTimeRate, attendanceRate, productivityScore: Math.max(0,Math.min(100,score))};
 };
@@ -1816,7 +1819,9 @@ EX.employeeMonthStats = function(empId, ym){
 EX.removeEmployee = function(id, hard){
   const emp = EX.byId('employees', id);
   if(!emp) return;
-  if(!EX.canDeleteEmployee()){ EX.toast('Only the MD, Operations Head / CEO and Super Admin can delete or remove employees.','bad'); return; }
+  if(!EX.canManageMembers()){ EX.toast('Only the Super Admin can add or remove members.','bad'); return; }
+  if(id===EX.session.employeeId){ EX.toast('You cannot remove your own profile.','bad'); return; }
+  if(EX.effRole(emp.role)==='super_admin' && emp.status!=='Removed' && EX.get('employees').filter(e=>EX.effRole(e.role)==='super_admin' && e.status!=='Removed').length<=1){ EX.toast('This is the only Super Admin — add another Super Admin before removing this one.','bad'); return; }
   EX.confirmAction(hard?'Delete profile permanently':'Deactivate employee',
     hard? `This permanently deletes <b>${emp.name}</b>'s profile. Task, attendance and leave history tied to them is kept for records but their profile disappears from every list. This can't be undone.`
         : `<b>${emp.name}</b> will be moved to <b>Removed</b> status and lose workspace access immediately. Their task and attendance history is kept. You can re-activate them later from Employees → filter: Removed.`,
@@ -1827,6 +1832,7 @@ EX.removeEmployee = function(id, hard){
     }, true);
 };
 EX.reactivateEmployee = async function(id){
+  if(!EX.canManageMembers()){ EX.toast('Only the Super Admin can add or remove members.','bad'); return; }
   await EX.patch('employees', id, {status:'Active', removedAt:null});
   await EX.addAudit('Reactivated employee','employees',id,{status:'Removed'},{status:'Active'});
   EX.toast('Employee reactivated','good');
@@ -3865,34 +3871,45 @@ EX.views['invoices'] = function(param){
   return `${EX.pageHead('Invoice Center', `${items.length} invoices`, `<button onclick="EX.showAddInvoiceModal()" class="ex-btn ex-btn-primary">${EX.icon('plus','w-4 h-4')} New invoice</button>`)}
   ${EX.dataTable({id:'invTable', rows:items, searchKey:i=>`${i.invoiceNumber} ${i.clientName}`, filterOptions:EX.INVOICE_STATUSES, filterKey:i=>i.status, filterLabel:'status', rowClick:i=>`EX.route('invoices','${i.id}')`,
     columns:[{label:'Invoice #',get:i=>i.invoiceNumber},{label:'Client',get:i=>i.clientName||'—'},{label:'Period',get:i=>i.billingPeriod},
-      {label:'Total',get:i=>EX.fmtMoney(i.total,i.currency)},{label:'Due',get:i=>EX.fmtDate(i.dueDate)},{label:'Status',get:i=>EX.pill(i.status)}], emptyLabel:'No invoices yet'})}`;
+      {label:'Total',get:i=>EX.fmtMoney(i.total,i.currency)},{label:'Due',get:i=>EX.fmtDate(i.dueDate)},{label:'Status',get:i=>EX.pill(i.status)}].concat(EX.canManageInvoices()?[{label:'',get:i=>`<div class="flex gap-1 justify-end"><button title="Edit invoice" onclick="event.stopPropagation();EX.showAddInvoiceModal(null,'${i.id}')" class="ex-btn ex-btn-ghost ex-btn-sm !p-1.5">${EX.icon('edit','w-3.5 h-3.5')}</button><button title="Delete invoice" onclick="event.stopPropagation();EX.deleteInvoiceModal('${i.id}')" class="ex-btn ex-btn-ghost ex-btn-sm !p-1.5" style="color:var(--ex-bad)">${EX.icon('trash','w-3.5 h-3.5')}</button></div>`}]:[]), emptyLabel:'No invoices yet'})}`;
 };
-EX.showAddInvoiceModal = function(clientId){
+// Invoices can be created, edited and deleted by whoever can open the Invoices page (Super Admin / MD and Accountant).
+EX.canManageInvoices = ()=> EX.can('invoices');
+EX.showAddInvoiceModal = function(clientId, editId){
   const cfg = EX.data.companyConfig||{};
-  EX.openModal(`${EX.modalHeader('New invoice')}
-    <form onsubmit="EX.saveInvoice(event)" class="p-5 max-h-[70vh] overflow-y-auto">
+  const inv = editId? EX.byId('invoices', editId) : null;
+  if(editId){
+    if(!EX.canManageInvoices()){ EX.toast('You do not have permission to edit invoices.','bad'); return; }
+    if(!inv) return;
+    clientId = inv.clientId;
+  }
+  const dueVal = inv? EX.utcDayKey(inv.dueDate||EX.now()) : new Date(Date.now()+15*86400000).toISOString().slice(0,10);
+  EX.openModal(`${EX.modalHeader(inv?'Edit invoice '+EX.esc(inv.invoiceNumber):'New invoice', inv?'The invoice number and client stay the same. Totals and payment status are recalculated when you save.':'')}
+    <form onsubmit="EX.saveInvoice(event${inv?`,'${inv.id}'`:''})" class="p-5 max-h-[70vh] overflow-y-auto">
       <div class="grid grid-cols-2 gap-3 mb-3">
-        <div><label class="ex-label">Client *</label><select name="clientId" class="ex-select" required>${EX.get('clients').map(c=>`<option value="${c.id}" ${c.id===clientId?'selected':''}>${c.companyName}</option>`).join('')}</select></div>
-        <div><label class="ex-label">Billing period</label><input name="billingPeriod" class="ex-input" value="${new Date().toLocaleString('en-IN',{month:'long',year:'numeric'})}"/></div>
-        <div><label class="ex-label">Due date</label><input type="date" name="dueDate" class="ex-input" value="${new Date(Date.now()+15*86400000).toISOString().slice(0,10)}" required/></div>
-        <div><label class="ex-label">Tax rate %</label><input type="number" name="taxRate" class="ex-input" value="${cfg.taxRate||18}"/></div>
+        <div><label class="ex-label">Client *</label><select name="clientId" class="ex-select" required ${inv?'disabled':''}>${EX.get('clients').map(c=>`<option value="${c.id}" ${c.id===clientId?'selected':''}>${EX.esc(c.companyName)}</option>`).join('')}</select>${inv?`<input type="hidden" name="clientId" value="${inv.clientId}"/>`:''}</div>
+        <div><label class="ex-label">Billing period</label><input name="billingPeriod" class="ex-input" value="${EX.esc(inv? inv.billingPeriod : new Date().toLocaleString('en-IN',{month:'long',year:'numeric'}))}"/></div>
+        <div><label class="ex-label">Due date</label><input type="date" name="dueDate" class="ex-input" value="${dueVal}" required/></div>
+        <div><label class="ex-label">Tax rate %</label><input type="number" name="taxRate" class="ex-input" value="${inv? (inv.taxRate??0) : (cfg.taxRate||18)}"/></div>
       </div>
       <label class="ex-label">Line items</label>
       <div id="lineItemsBox" class="space-y-2 mb-2"></div>
       <button type="button" onclick="EX.addInvoiceLineRow()" class="ex-btn ex-btn-ghost ex-btn-sm mb-3">${EX.icon('plus','w-3.5 h-3.5')} Add line</button>
-      <div><label class="ex-label">Notes</label><textarea name="notes" class="ex-textarea" rows="2"></textarea></div>
-      <div class="flex justify-end gap-2 pt-3 mt-2 border-t" style="border-color:var(--ex-line)"><button type="button" class="ex-btn ex-btn-ghost" onclick="EX.closeModal()">Cancel</button><button class="ex-btn ex-btn-primary">Create invoice</button></div>
+      <div><label class="ex-label">Notes</label><textarea name="notes" class="ex-textarea" rows="2">${EX.esc(inv&&inv.notes||'')}</textarea></div>
+      <div class="flex justify-end gap-2 pt-3 mt-2 border-t" style="border-color:var(--ex-line)"><button type="button" class="ex-btn ex-btn-ghost" onclick="EX.closeModal()">Cancel</button><button class="ex-btn ex-btn-primary">${inv?'Save changes':'Create invoice'}</button></div>
     </form>`,{wide:true});
+  if(inv){ (inv.lineItems&&inv.lineItems.length? inv.lineItems : [{desc:'',qty:1,rate:0}]).forEach(l=>EX.addInvoiceLineRow(l.desc, l.qty, l.rate)); return; }
   EX.addInvoiceLineRow('Monthly Retainer — Engage X Service Fee', 1, (EX.canSeeRetainer()&&clientId&&EX.byId('clients',clientId)?EX.byId('clients',clientId).monthlyFee:0)||0);
 };
 EX.addInvoiceLineRow = function(desc, qty, rate){
   const box = document.getElementById('lineItemsBox');
   const row = document.createElement('div'); row.className='grid grid-cols-[1fr_70px_100px_28px] gap-2 items-center';
-  row.innerHTML = `<input class="ex-input li-desc" placeholder="Description" value="${desc||''}"/><input type="number" class="ex-input li-qty" placeholder="Qty" value="${qty||1}"/><input type="number" class="ex-input li-rate" placeholder="Rate" value="${rate||''}"/><button type="button" onclick="this.parentElement.remove()" class="ex-btn ex-btn-ghost !p-1.5">${EX.icon('x','w-3.5 h-3.5')}</button>`;
+  row.innerHTML = `<input class="ex-input li-desc" placeholder="Description" value="${EX.esc(desc||'')}"/><input type="number" class="ex-input li-qty" placeholder="Qty" value="${qty||1}"/><input type="number" class="ex-input li-rate" placeholder="Rate" value="${rate||''}"/><button type="button" onclick="this.parentElement.remove()" class="ex-btn ex-btn-ghost !p-1.5">${EX.icon('x','w-3.5 h-3.5')}</button>`;
   box.appendChild(row);
 };
-EX.saveInvoice = async function(ev){
+EX.saveInvoice = async function(ev, editId){
   ev.preventDefault();
+  if(editId && !EX.canManageInvoices()){ EX.toast('You do not have permission to edit invoices.','bad'); return; }
   const fd = new FormData(ev.target);
   const client = EX.byId('clients', fd.get('clientId'));
   const rows = Array.from(document.querySelectorAll('#lineItemsBox > div'));
@@ -3900,6 +3917,15 @@ EX.saveInvoice = async function(ev){
   const subtotal = lineItems.reduce((s,l)=>s+l.amount,0);
   const taxRate = Number(fd.get('taxRate')||0);
   const taxAmount = Math.round(subtotal*taxRate/100);
+  if(editId){
+    const before = EX.byId('invoices', editId); if(!before) return;
+    if(!lineItems.length){ EX.toast('Add at least one line item.','bad'); return; }
+    const upd = {billingPeriod:fd.get('billingPeriod'), lineItems, subtotal, taxRate, taxAmount, total:subtotal+taxAmount, dueDate:new Date(fd.get('dueDate')).getTime(), notes:fd.get('notes')};
+    try{ await EX.patch('invoices', editId, upd); }catch(e){ return; }
+    await EX.recomputeInvoiceStatus(editId);
+    await EX.addAudit('Invoice edited','invoices',editId,{total:before.total,dueDate:before.dueDate,billingPeriod:before.billingPeriod,lineItems:before.lineItems,notes:before.notes},{total:upd.total,dueDate:upd.dueDate,billingPeriod:upd.billingPeriod,lineItems:upd.lineItems,notes:upd.notes});
+    EX.closeModal(); EX.toast('Invoice updated','good'); return;
+  }
   const id = await EX.add('invoices', {clientId:client.id, invoiceNumber:EX.seqNumber('invoices','INV'), billingPeriod:fd.get('billingPeriod'),
     lineItems, subtotal, taxRate, taxAmount, total:subtotal+taxAmount, currency:client.currency||'INR', dueDate:new Date(fd.get('dueDate')).getTime(), status:'Generated', notes:fd.get('notes')});
   await EX.addNotification({targetRole:'accounts', message:`Invoice ${EX.byId('invoices',id).invoiceNumber} generated for ${client.companyName}.`, link:'invoices'});
@@ -3914,7 +3940,8 @@ EX.invoiceDetail = function(id){
   return `<a href="#/invoices" class="text-xs inline-flex items-center gap-1 mb-3" style="color:var(--ex-ink-soft)">${EX.icon('chevron-left','w-3.5 h-3.5')} All invoices</a>
   <div class="flex flex-wrap items-start justify-between gap-3 mb-4">
     <div><h1 class="font-display text-xl font-bold">${inv.invoiceNumber}</h1><div class="text-sm mt-0.5" style="color:var(--ex-ink-soft)">${client?client.companyName:''} · ${inv.billingPeriod}</div></div>
-    <div class="flex items-center gap-2">${EX.pill(inv.status)}
+    <div class="flex flex-wrap items-center gap-2">${EX.pill(inv.status)}
+      ${EX.canManageInvoices()?`<button onclick="EX.showAddInvoiceModal(null,'${id}')" class="ex-btn ex-btn-ghost">${EX.icon('edit','w-4 h-4')} Edit</button><button onclick="EX.deleteInvoiceModal('${id}')" class="ex-btn ex-btn-ghost" style="color:var(--ex-bad)">${EX.icon('trash','w-4 h-4')} Delete</button>`:''}
       <select onchange="EX.overrideInvoiceStatus('${id}',this.value)" class="ex-select !w-auto"><option value="">Override status…</option>${['Cancelled','Refunded','Draft'].map(s=>`<option>${s}</option>`).join('')}</select>
     </div>
   </div>
@@ -3949,6 +3976,33 @@ EX.invoiceText = function(inv, client){
 EX.exportInvoiceText = async function(id){
   const inv = EX.byId('invoices', id); const client = EX.byId('clients', inv.clientId);
   await EX.downloadFile(`${inv.invoiceNumber}.txt`, EX.invoiceText(inv, client));
+};
+EX.deleteInvoiceModal = function(id){
+  const inv = EX.byId('invoices', id); if(!inv) return;
+  if(!EX.canManageInvoices()){ EX.toast('You do not have permission to delete invoices.','bad'); return; }
+  const pays = EX.get('payments').filter(p=>p.invoiceId===id);
+  const paidN = pays.filter(p=>p.status==='Paid').length;
+  EX.openModal(`${EX.modalHeader('Delete invoice '+EX.esc(inv.invoiceNumber)+'?', 'This cannot be undone.')}
+    <div class="p-5 text-sm">
+      <div class="rounded-xl p-3 mb-3" style="background:var(--ex-bad-bg);color:var(--ex-bad)"><b>${EX.esc(inv.invoiceNumber)}</b> (${EX.fmtMoney(inv.total,inv.currency)}) will be permanently removed from the books and from the client's portal.</div>
+      <p class="mb-3" style="color:var(--ex-ink-soft)">If it was raised by mistake but you want to keep a record, use <b>Override status → Cancelled</b> instead.</p>
+      ${pays.length?`<label class="flex items-start gap-2 mb-3 text-xs"><input type="checkbox" id="delInvPay" class="mt-0.5" onchange="document.getElementById('delInvGo').disabled=!(this.checked&&document.getElementById('delInvAck').checked)"><span>This invoice has <b>${pays.length}</b> recorded payment${pays.length>1?'s':''}${paidN?` (${paidN} already verified as received)`:''}. Delete ${pays.length>1?'them':'it'} and the receipt${pays.length>1?'s':''} too.</span></label>`:''}
+      <label class="flex items-start gap-2 mb-3 text-xs"><input type="checkbox" id="delInvAck" class="mt-0.5" onchange="document.getElementById('delInvGo').disabled=!(this.checked&&(!document.getElementById('delInvPay')||document.getElementById('delInvPay').checked))"><span>I understand this cannot be undone.</span></label>
+    </div>
+    <div class="flex justify-end gap-2 p-4 border-t" style="border-color:var(--ex-line)"><button class="ex-btn ex-btn-ghost" onclick="EX.closeModal()">Cancel</button><button id="delInvGo" disabled class="ex-btn ex-btn-danger" onclick="EX.performDeleteInvoice('${id}')">Delete invoice</button></div>`);
+};
+EX.performDeleteInvoice = async function(id){
+  const inv = EX.byId('invoices', id); if(!inv) return;
+  if(!EX.canManageInvoices()) return;
+  const pays = EX.get('payments').filter(p=>p.invoiceId===id);
+  if(pays.length && !(document.getElementById('delInvPay')&&document.getElementById('delInvPay').checked)) return;
+  try{
+    for(const p of pays) await EX.remove('payments', p.id);
+    await EX.remove('invoices', id);
+  }catch(e){ return; }
+  await EX.addAudit('Deleted invoice','invoices',id,{invoiceNumber:inv.invoiceNumber,clientId:inv.clientId,total:inv.total,status:inv.status,billingPeriod:inv.billingPeriod,paymentsRemoved:pays.length},null);
+  EX.closeModal(); EX.toast('Invoice '+inv.invoiceNumber+' deleted','good');
+  if(location.hash.indexOf('#/invoices/')===0) EX.route('invoices');
 };
 EX.overrideInvoiceStatus = async function(id,status){ if(!status)return; const inv=EX.byId('invoices',id); await EX.patch('invoices',id,{status}); await EX.addAudit('Invoice status overridden','invoices',id,{status:inv.status},{status}); EX.toast('Status updated','good'); };
 EX.logManualPaymentModal = function(invoiceId){
@@ -4265,7 +4319,7 @@ EX.views['employees'] = function(param){
   const emps = EX.get('employees');
   return `${EX.pageHead('Employees', `${emps.filter(e=>e.status==='Active').length} active · ${emps.filter(e=>e.status==='Removed').length} removed`, `
     <button onclick="EX.route('employees','review')" class="ex-btn ex-btn-ghost">${EX.icon('bar-chart','w-4 h-4')} Monthly Review Dashboard</button>
-    <button onclick="EX.showEmpModal()" class="ex-btn ex-btn-primary">${EX.icon('plus','w-4 h-4')} Add employee</button>`)}
+    ${EX.canManageMembers()?`<button onclick="EX.showEmpModal()" class="ex-btn ex-btn-primary">${EX.icon('plus','w-4 h-4')} Add employee</button>`:''}`)}
   ${EX.dataTable({id:'empTable', rows:emps, searchKey:e=>`${e.name} ${e.role} ${e.department}`, filterOptions:['Active','On Leave','Removed'], filterKey:e=>e.status, filterLabel:'status',
     rowClick:e=>`EX.route('employees','${e.id}')`,
     columns:[
@@ -4276,14 +4330,16 @@ EX.views['employees'] = function(param){
       {label:'This month score', get:e=>{const s=EX.employeeMonthStats(e.id); return `<span class="tnum font-semibold">${s.productivityScore}</span>`;}},
       {label:'Actions', get:e=>`<div class="flex gap-1">
         <button onclick="event.stopPropagation();EX.showEmpModal('${e.id}')" class="ex-btn ex-btn-ghost ex-btn-sm !p-1.5" title="Edit">${EX.icon('edit','w-3.5 h-3.5')}</button>
-        ${e.status==='Removed'?`<button onclick="event.stopPropagation();EX.reactivateEmployee('${e.id}')" class="ex-btn ex-btn-ghost ex-btn-sm">Reactivate</button>`:(EX.canDeleteEmployee()?`<button onclick="event.stopPropagation();EX.removeEmployee('${e.id}',false)" class="ex-btn ex-btn-ghost ex-btn-sm !p-1.5" title="Deactivate">${EX.icon('log-out','w-3.5 h-3.5')}</button>`:'')}
+        ${e.status==='Removed'?(EX.canManageMembers()?`<button onclick="event.stopPropagation();EX.reactivateEmployee('${e.id}')" class="ex-btn ex-btn-ghost ex-btn-sm">Reactivate</button>`:''):(EX.canDeleteEmployee()?`<button onclick="event.stopPropagation();EX.removeEmployee('${e.id}',false)" class="ex-btn ex-btn-ghost ex-btn-sm !p-1.5" title="Deactivate">${EX.icon('log-out','w-3.5 h-3.5')}</button>`:'')}
         ${EX.canDeleteEmployee()?`<button onclick="event.stopPropagation();EX.removeEmployee('${e.id}',true)" class="ex-btn ex-btn-danger ex-btn-sm !p-1.5" title="Delete permanently">${EX.icon('trash','w-3.5 h-3.5')}</button>`:''}
       </div>`},
     ], emptyLabel:'No employees yet'})}`;
 };
 EX.showEmpModal = function(id){
   const emp = id? EX.byId('employees', id) : null;
-  const fields = EX.EMP_FIELDS.map(f=> f.key==='managerId'? Object.assign({},f,{options:EX.get('employees').filter(e=>e.id!==id).map(e=>({value:e.id,label:e.name}))}) : f);
+  if(!EX.canManageMembers() && !id){ EX.toast('Only the Super Admin can add members.','bad'); return; }
+  const fields = EX.EMP_FIELDS.map(f=> f.key==='managerId'? Object.assign({},f,{options:EX.get('employees').filter(e=>e.id!==id).map(e=>({value:e.id,label:e.name}))})
+    : (f.key==='role' && !EX.canManageMembers())? Object.assign({},f,{disabled:true, hint:'Only the Super Admin can change roles.'}) : f);
   EX.openModal(`${EX.modalHeader(id?'Edit employee':'Add employee / intern', 'Interns, part-timers and outsourced editors use the same form — set Employment Type accordingly.')}
     <form onsubmit="EX.saveEmployee(event${id?`,'${id}'`:''})" class="p-5 max-h-[70vh] overflow-y-auto">${EX.formGrid(fields, emp||{status:'Active',employmentType:'Full-time'}, 2)}
     <div class="flex justify-end gap-2 pt-3 mt-2 border-t" style="border-color:var(--ex-line)"><button type="button" class="ex-btn ex-btn-ghost" onclick="EX.closeModal()">Cancel</button><button class="ex-btn ex-btn-primary">Save</button></div></form>`,{wide:true});
@@ -4291,6 +4347,8 @@ EX.showEmpModal = function(id){
 EX.saveEmployee = async function(ev, id){
   ev.preventDefault();
   const data = EX.readForm(ev.target, EX.EMP_FIELDS);
+  if(!id && !EX.canManageMembers()){ EX.toast('Only the Super Admin can add members.','bad'); return; }
+  if(id && !EX.canManageMembers()){ const ex0 = EX.byId('employees', id); if(ex0) data.role = ex0.role; }   // others may update profile details, never roles
   // Only a Super Admin / MD may hand out (or change) Super Admin-level roles — Ops Head-level roles cannot promote anyone to it.
   if(EX.currentRole()!=='super_admin'){
     const existing = id? EX.byId('employees', id) : null;
@@ -4311,6 +4369,7 @@ EX.saveEmployee = async function(ev, id){
 EX.setupLogin = function(id){
   const emp = EX.byId('employees', id);
   if(!emp) return;
+  if(!EX.canManageMembers()){ EX.toast('Only the Super Admin can set up logins.','bad'); return; }
   if(!emp.email){ EX.toast("This employee has no email on file — add one via Edit profile first, then set up their login.", 'bad'); return; }
   EX.openModal(`${EX.modalHeader('Set up login for '+emp.name, "Creates a Supabase Auth account so they can sign in with their own email and password. This doesn't affect your own session.")}
     <form onsubmit="EX.submitSetupLogin(event,'${id}')" class="p-5 space-y-3">
@@ -4322,6 +4381,7 @@ EX.setupLogin = function(id){
 };
 EX.submitSetupLogin = async function(ev, id){
   ev.preventDefault();
+  if(!EX.canManageMembers()){ EX.toast('Only the Super Admin can set up logins.','bad'); return; }
   const emp = EX.byId('employees', id);
   if(!emp) return;
   const fd = new FormData(ev.target);
@@ -4367,7 +4427,7 @@ EX.monthlyReviewDashboard = function(opts){
     <div class="text-xs" style="color:var(--ex-ink-soft)">${top.tasksCompleted}/${top.tasksAssigned} tasks completed, ${top.daysPresent} days present, ${top.hoursWorked}h logged</div></div>
   </div>`:''}
   <div class="ex-card overflow-x-auto">
-    <table class="ex-table"><thead><tr><th>Employee</th><th>Role</th><th>Days Present</th><th>Late</th><th>Hours Worked</th><th>Tasks Done</th><th>On-time</th><th>Revisions</th><th>Leave</th><th>WFH</th><th>EOD</th><th>Score</th></tr></thead>
+    <table class="ex-table"><thead><tr><th>Employee</th><th>Role</th><th>Days Present</th><th>Late</th><th>Hours Worked</th><th>Tasks Done</th><th>On-time</th><th>Revisions</th><th>Leave</th><th>WFH</th><th>EOD</th><th>Achiev.</th><th>Escal.</th><th>Score</th></tr></thead>
     <tbody>${rows.map(r=>`<tr>
       <td><div class="flex items-center gap-2">${EX.avatar(r.emp.name,24)}${r.emp.name}</div></td>
       <td>${(EX.ROLES[r.emp.role]||{}).label||r.emp.role}</td>
@@ -4375,8 +4435,9 @@ EX.monthlyReviewDashboard = function(opts){
       <td class="tnum">${r.tasksCompleted}/${r.tasksAssigned}</td>
       <td class="tnum">${Math.round(r.onTimeRate*100)}%</td>
       <td class="tnum">${r.revisions}</td><td class="tnum">${r.leaveDays}</td><td class="tnum">${r.wfhDays}</td><td class="tnum">${r.eodDays}</td>
+      <td class="tnum" style="color:${r.achievements?'var(--ex-good)':'inherit'}">${r.achievements}</td><td class="tnum" style="color:${r.escalations?'var(--ex-bad)':'inherit'}">${r.escalations}</td>
       <td class="tnum font-semibold">${r.productivityScore}</td>
-    </tr>`).join('') || `<tr><td colspan="12">${EX.empty('No employees to show')}</td></tr>`}</tbody></table>
+    </tr>`).join('') || `<tr><td colspan="14">${EX.empty('No employees to show')}</td></tr>`}</tbody></table>
   </div>`;
 };
 EX.downloadMonthlyReviewPdf = async function(ym, empId){
@@ -4388,10 +4449,10 @@ EX.downloadMonthlyReviewPdf = async function(ym, empId){
   if(!empId){
     doc.stats([{label:'Employees',value:String(rows.length)},{label:'Total leave days',value:String(tot('leaveDays'))},{label:'Total WFH days',value:String(tot('wfhDays'))},{label:'Avg productivity',value:String(rows.length? Math.round(tot('productivityScore')/rows.length):0)}],4);
   }
-  doc.table([{label:'Employee',w:2.9},{label:'Present',w:1,align:'right'},{label:'WFH',w:0.9,align:'right'},{label:'Leave',w:0.9,align:'right'},{label:'Late',w:0.8,align:'right'},{label:'Hours',w:1,align:'right'},{label:'Tasks',w:1.1,align:'right'},{label:'On-time',w:1.1,align:'right'},{label:'Rev.',w:0.8,align:'right'},{label:'EOD',w:0.9,align:'right'},{label:'Score',w:1,align:'right'}],
-    rows.map(r=>[r.emp.name+' ('+((EX.ROLES[r.emp.role]||{}).label||r.emp.role)+')', r.daysPresent, r.wfhDays, r.leaveDays, r.lateDays, r.hoursWorked, r.tasksCompleted+'/'+r.tasksAssigned, Math.round(r.onTimeRate*100)+'%', r.revisions, r.eodDays, r.productivityScore]),
+  doc.table([{label:'Employee',w:2.5},{label:'Present',w:0.9,align:'right'},{label:'WFH',w:0.8,align:'right'},{label:'Leave',w:0.8,align:'right'},{label:'Late',w:0.7,align:'right'},{label:'Hours',w:0.9,align:'right'},{label:'Tasks',w:1,align:'right'},{label:'On-time',w:1,align:'right'},{label:'Rev.',w:0.7,align:'right'},{label:'EOD',w:0.7,align:'right'},{label:'Ach.',w:0.7,align:'right'},{label:'Esc.',w:0.7,align:'right'},{label:'Score',w:0.9,align:'right'}],
+    rows.map(r=>[r.emp.name+' ('+((EX.ROLES[r.emp.role]||{}).label||r.emp.role)+')', r.daysPresent, r.wfhDays, r.leaveDays, r.lateDays, r.hoursWorked, r.tasksCompleted+'/'+r.tasksAssigned, Math.round(r.onTimeRate*100)+'%', r.revisions, r.eodDays, r.achievements, r.escalations, r.productivityScore]),
     {size:7.5, empty:'No employees'});
-  doc.paragraph(`Present = days with a check-in. WFH and Leave = approved requests (Sundays excluded). Late = check-in after ${EX.officeStart()} + 15 minutes. Score = task completion 40%, on-time delivery 30%, attendance 20%, low revisions 10%.`, {size:7.5, color:[90,102,122]});
+  doc.paragraph(`Present = days with a check-in. WFH and Leave = approved requests (Sundays excluded). Late = check-in after ${EX.officeStart()} + 15 minutes. Score = task completion 40%, on-time delivery 30%, attendance 20%, low revisions 10%. Ach. = achievements and Esc. = escalations logged this month (they do not change the score).`, {size:7.5, color:[90,102,122]});
   if(empId && emps[0]){
     const e = emps[0];
     doc.heading('Day-by-day attendance');
@@ -4403,6 +4464,13 @@ EX.downloadMonthlyReviewPdf = async function(ym, empId){
     const tasks = EX.get('tasks').filter(t=>t.assignedTo===e.id && t._createdAt && EX.monthKey(new Date(t._createdAt))===ym);
     doc.heading('Tasks this month');
     doc.table([{label:'Task',w:3.2},{label:'Client',w:2},{label:'Deadline',w:1.3},{label:'Status',w:1.2}], tasks.map(t=>[t.title,(EX.byId('clients',t.clientId)||{}).companyName||'-',EX.fmtDate(t.deadline),t.status]), {empty:'No tasks assigned this month'});
+    const escs = EX.empRecordsInMonth(e, ym, 'escalation'), achs = EX.empRecordsInMonth(e, ym, 'achievement');
+    doc.heading('Achievements this month');
+    doc.paragraph(`${achs.length} achievement${achs.length===1?'':'s'} logged for ${EX.monthLabel(ym)}.`, {size:9});
+    doc.table([{label:'Date',w:1.2},{label:'Client',w:1.8},{label:'Achievement',w:2.4},{label:'Details',w:3}], achs.map(r=>[EX.fmtDate(r.date), EX.recClientName(r), r.title, r.details||'-']), {empty:'No achievements logged this month'});
+    doc.heading('Escalations this month');
+    doc.paragraph(`${escs.length} escalation${escs.length===1?'':'s'} logged for ${EX.monthLabel(ym)}${escs.length?` (${escs.filter(r=>r.status!=='Resolved').length} still open)`:''}.`, {size:9});
+    doc.table([{label:'Date',w:1.2},{label:'Client',w:1.6},{label:'Severity',w:1},{label:'Escalation',w:2.2},{label:'Status',w:1},{label:'Action taken',w:2.2}], escs.map(r=>[EX.fmtDate(r.date), EX.recClientName(r), r.severity||'-', r.title+(r.details?' - '+r.details:''), r.status==='Resolved'?'Resolved':'Open', r.resolution||'-']), {empty:'No escalations logged this month', size:8});
   }
   await EX.saveDoc(doc, `${empId&&emps[0]?'Employee-Report-'+EX.safeFile(emps[0].name):'Team-Performance'}-${ym}.pdf`);
 };
@@ -4411,8 +4479,101 @@ EX.exportMonthlyReview = async function(ym){
   const rows = emps.map(e=> Object.assign({name:e.name, role:(EX.ROLES[e.role]||{}).label||e.role}, EX.employeeMonthStats(e.id, ym)));
   const csv = EX.toCsv(rows, [{label:'Employee',key:'name'},{label:'Role',key:'role'},{label:'Days Present',key:'daysPresent'},{label:'Hours Worked',key:'hoursWorked'},
     {label:'Tasks Assigned',key:'tasksAssigned'},{label:'Tasks Completed',key:'tasksCompleted'},{label:'On-time Completed',key:'onTimeCompleted'},{label:'Revisions',key:'revisions'},
-    {label:'Leave Days',key:'leaveDays'},{label:'WFH Days',key:'wfhDays'},{label:'Late Days',key:'lateDays'},{label:'EOD Reports Submitted',key:'eodDays'},{label:'Productivity Score',key:'productivityScore'}]);
+    {label:'Leave Days',key:'leaveDays'},{label:'WFH Days',key:'wfhDays'},{label:'Late Days',key:'lateDays'},{label:'EOD Reports Submitted',key:'eodDays'},{label:'Achievements',key:'achievements'},{label:'Escalations',key:'escalations'},{label:'Open Escalations',key:'escalationsOpen'},{label:'Productivity Score',key:'productivityScore'}]);
   await EX.downloadFile(`Monthly-Review-${ym}.csv`, csv);
+};
+
+/* ================= ESCALATIONS & ACHIEVEMENTS (per employee, each tied to a client) =================
+   Stored inside the employee's own record as one key per entry (rec_<id>) — no new database table needed, so one entry
+   never rewrites another. (Saving is read-then-write on the employee's record, so two people saving the *same employee* in the very same
+   fraction of a second could drop one entry — practically only possible if two admins click Save together.) A deleted entry is set to null and ignored. */
+EX.ESC_SEVERITY = ['Low','Medium','High','Critical'];
+EX.empRecords = function(emp, kind){
+  if(!emp) return [];
+  return Object.keys(emp).filter(k=>k.indexOf('rec_')===0 && emp[k] && typeof emp[k]==='object' && (!kind || emp[k].kind===kind)).map(k=>emp[k]).sort((a,b)=>(b.date||0)-(a.date||0));
+};
+EX.recMonth = (r)=> EX.utcDayKey(r.date||r.createdAt||EX.now()).slice(0,7);
+EX.empRecordsInMonth = (emp, ym, kind)=> EX.empRecords(emp, kind).filter(r=>EX.recMonth(r)===ym);
+EX.recClientName = (r)=> (EX.byId('clients', r.clientId)||{}).companyName || r.clientName || '—';
+// Who may log / edit / delete: everyone who can open the Employees page (Super Admin/MD, Ops Head/DM Manager, Creative Head, HR).
+EX.canManageRecords = ()=> EX.can('employees');
+EX.recordModal = function(empId, kind, recId){
+  if(!EX.canManageRecords()){ EX.toast('You do not have permission to log escalations or achievements.','bad'); return; }
+  const emp = EX.byId('employees', empId); if(!emp) return;
+  const esc = kind==='escalation';
+  const r = recId? (emp['rec_'+recId]||{}) : {date:new Date(EX.todayKey()).getTime(), severity:'Medium', status:'Open'};
+  const clients = EX.get('clients').slice().sort((a,b)=>(a.companyName||'').localeCompare(b.companyName||''));
+  if(!clients.length){ EX.toast('Add a client first — each entry is linked to a client.','bad'); return; }
+  const fields = [
+    {key:'clientId', label:'Client it happened on', type:'select', required:true, options:[{value:'',label:'— Select a client —'}].concat(clients.map(c=>({value:c.id,label:c.companyName})))},
+    {key:'date', label:'Date', type:'date', required:true},
+    {key:'title', label:esc?'What was escalated':'Achievement', required:true, full:true, placeholder:esc?'e.g. Client complained about delayed reels':'e.g. Delivered a 40% lift in leads'},
+    {key:'details', label:'Details', type:'textarea', full:true, rows:3},
+  ].concat(esc?[
+    {key:'severity', label:'Severity', type:'select', options:EX.ESC_SEVERITY},
+    {key:'status', label:'Status', type:'select', options:['Open','Resolved']},
+    {key:'resolution', label:'Resolution / action taken', type:'textarea', full:true, rows:2},
+  ]:[]);
+  EX.openModal(`${EX.modalHeader((recId?'Edit ':'Log ')+(esc?'escalation':'achievement'), EX.esc(emp.name))}
+    <form onsubmit="EX.saveRecord(event,'${empId}','${kind}'${recId?`,'${recId}'`:''})" class="p-5 max-h-[70vh] overflow-y-auto">${EX.formGrid(fields, r, 2)}
+    <div class="flex justify-end gap-2 pt-3 mt-2 border-t" style="border-color:var(--ex-line)"><button type="button" class="ex-btn ex-btn-ghost" onclick="EX.closeModal()">Cancel</button><button class="ex-btn ex-btn-primary">Save</button></div></form>`,{wide:true});
+};
+EX.saveRecord = async function(ev, empId, kind, recId){
+  ev.preventDefault();
+  if(!EX.canManageRecords()){ EX.toast('You do not have permission to log escalations or achievements.','bad'); return; }
+  const emp = EX.byId('employees', empId); if(!emp) return;
+  const esc = kind==='escalation';
+  const d = EX.readForm(ev.target, [{key:'clientId'},{key:'date',type:'date'},{key:'title'},{key:'details'}].concat(esc?[{key:'severity'},{key:'status'},{key:'resolution'}]:[]));
+  const client = EX.byId('clients', d.clientId);
+  if(!client){ EX.toast('Please select the client this happened on.','bad'); return; }
+  if(!(d.title||'').trim()){ EX.toast('Please describe it.','bad'); return; }
+  const id = recId || EX.uid('rec');
+  const old = recId? emp['rec_'+recId] : null;
+  const me = EX.currentEmployee();
+  const rec = Object.assign({}, old||{}, {id, kind, clientId:client.id, clientName:client.companyName, date:d.date||EX.now(), title:d.title.trim(), details:(d.details||'').trim(),
+    createdAt: old? old.createdAt : EX.now(), createdBy: old? old.createdBy : (me?me.id:null), createdByName: old? old.createdByName : (me?me.name:'')});
+  if(esc){ rec.severity = d.severity||'Medium'; rec.status = d.status||'Open'; rec.resolution = (d.resolution||'').trim(); if(rec.status==='Resolved' && !rec.resolvedAt) rec.resolvedAt = EX.now(); if(rec.status!=='Resolved') rec.resolvedAt = null; }
+  try{ await EX.patch('employees', empId, {['rec_'+id]: rec}); }catch(e){ return; }
+  await EX.addAudit((recId?'Edited ':'Logged ')+kind,'employees',empId,old,{client:client.companyName, title:rec.title, severity:rec.severity||null});
+  EX.closeModal(); EX.toast((esc?'Escalation':'Achievement')+' saved','good');
+};
+EX.deleteRecord = function(empId, recId){
+  if(!EX.canManageRecords()){ EX.toast('You do not have permission to delete entries.','bad'); return; }
+  const emp = EX.byId('employees', empId); const r = emp && emp['rec_'+recId]; if(!r) return;
+  EX.confirmAction('Delete this '+r.kind+'?', `<b>${EX.esc(r.title)}</b> (${EX.esc(EX.recClientName(r))}) will be removed from ${EX.esc(emp.name)}'s record and from their performance reports.`, async ()=>{
+    await EX.patch('employees', empId, {['rec_'+recId]: null});
+    await EX.addAudit('Deleted '+r.kind,'employees',empId,{client:EX.recClientName(r), title:r.title, severity:r.severity||null},null);
+    EX.toast('Deleted','good');
+  }, true);
+};
+EX.toggleEscalation = async function(empId, recId){
+  if(!EX.canManageRecords()) return;
+  const emp = EX.byId('employees', empId); const r = emp && emp['rec_'+recId]; if(!r) return;
+  const resolved = r.status!=='Resolved';
+  try{ await EX.patch('employees', empId, {['rec_'+recId]: Object.assign({}, r, {status: resolved?'Resolved':'Open', resolvedAt: resolved?EX.now():null})}); }catch(e){ return; }
+  await EX.addAudit(resolved?'Escalation resolved':'Escalation reopened','employees',empId,{status:r.status},{status:resolved?'Resolved':'Open'});
+};
+EX.sevPill = (s)=> `<span class="ex-pill ex-pill-${({Low:'neutral',Medium:'warn',High:'bad',Critical:'bad'})[s]||'neutral'}">${EX.esc(s||'—')}</span>`;
+EX.recTable = function(emp, kind, list){
+  const esc = kind==='escalation';
+  const act = (r)=> EX.canManageRecords()? `<div class="flex gap-1 justify-end">${esc?`<button onclick="EX.toggleEscalation('${emp.id}','${r.id}')" class="ex-btn ex-btn-ghost ex-btn-sm">${r.status==='Resolved'?'Reopen':'Mark resolved'}</button>`:''}<button title="Edit" onclick="EX.recordModal('${emp.id}','${kind}','${r.id}')" class="ex-btn ex-btn-ghost ex-btn-sm !p-1.5">${EX.icon('edit','w-3.5 h-3.5')}</button><button title="Delete" onclick="EX.deleteRecord('${emp.id}','${r.id}')" class="ex-btn ex-btn-ghost ex-btn-sm !p-1.5" style="color:var(--ex-bad)">${EX.icon('trash','w-3.5 h-3.5')}</button></div>` : '';
+  return `<div class="ex-card overflow-x-auto"><table class="ex-table"><thead><tr><th>Date</th><th>Client</th>${esc?'<th>Severity</th>':''}<th>${esc?'Escalation':'Achievement'}</th>${esc?'<th>Status</th>':''}<th>Logged by</th><th></th></tr></thead>
+    <tbody>${list.length? list.map(r=>`<tr><td class="whitespace-nowrap">${EX.fmtDate(r.date)}</td><td>${EX.esc(EX.recClientName(r))}</td>${esc?`<td>${EX.sevPill(r.severity)}</td>`:''}
+      <td><div class="font-medium">${EX.esc(r.title)}</div>${r.details?`<div class="text-xs" style="color:var(--ex-ink-soft)">${EX.esc(r.details)}</div>`:''}${esc&&r.resolution?`<div class="text-xs mt-0.5" style="color:var(--ex-good)">Action: ${EX.esc(r.resolution)}</div>`:''}</td>
+      ${esc?`<td>${EX.pill(r.status==='Resolved'?'Resolved':'Open')}</td>`:''}<td>${EX.esc(r.createdByName||'—')}</td><td>${act(r)}</td></tr>`).join('') : `<tr><td colspan="7">${EX.empty(esc?'No escalations logged for '+emp.name:'No achievements logged yet for '+emp.name)}</td></tr>`}</tbody></table></div>`;
+};
+EX.recTab = function(emp, kind){
+  const esc = kind==='escalation'; const list = EX.empRecords(emp, kind);
+  const open = esc? list.filter(r=>r.status!=='Resolved').length : 0;
+  return `<div class="flex flex-wrap items-center justify-between gap-2 mb-3"><div class="text-sm" style="color:var(--ex-ink-soft)">${list.length} ${esc?'escalation':'achievement'}${list.length===1?'':'s'}${esc&&list.length?` · ${open} open`:''} — each is linked to the client it happened on and appears in ${EX.esc(emp.name)}'s monthly performance report.</div>
+    ${EX.canManageRecords()?`<button onclick="EX.recordModal('${emp.id}','${kind}')" class="ex-btn ex-btn-primary">${EX.icon('plus','w-4 h-4')} ${esc?'Add escalation':'Add achievement'}</button>`:''}</div>${EX.recTable(emp, kind, list)}`;
+};
+// month section used inside the on-screen performance tab
+EX.recMonthSection = function(emp, ym){
+  const escs = EX.empRecordsInMonth(emp, ym, 'escalation'), achs = EX.empRecordsInMonth(emp, ym, 'achievement');
+  return `<div class="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-4">
+    <div><div class="font-display font-bold text-sm mb-2">Escalations — ${EX.monthLabel(ym)} (${escs.length})</div>${EX.recTable(emp,'escalation',escs)}</div>
+    <div><div class="font-display font-bold text-sm mb-2">Achievements — ${EX.monthLabel(ym)} (${achs.length})</div>${EX.recTable(emp,'achievement',achs)}</div></div>`;
 };
 
 /* ================= EMPLOYEE DETAIL (profile, projects, assets) ================= */
@@ -4426,13 +4587,14 @@ EX.employeeDetail = function(id){
   const myClients = [...new Set(myTasks.map(t=>t.clientId).filter(Boolean))].map(cid=>EX.byId('clients',cid)).filter(Boolean);
   const myAssets = EX.get('companyAssets').filter(a=>a.assignedTo===id);
   const stats = EX.employeeMonthStats(id);
-  const tabs = [['overview','Overview'],['projects','Projects & Tasks'],['assets','Assets'],['performance','Performance']];
+  const nEsc = EX.empRecords(e,'escalation').length, nAch = EX.empRecords(e,'achievement').length;
+  const tabs = [['overview','Overview'],['projects','Projects & Tasks'],['assets','Assets'],['escalations','Escalations'+(nEsc?` (${nEsc})`:'')],['achievements','Achievements'+(nAch?` (${nAch})`:'')],['performance','Performance']];
   return `<a href="#/employees" class="text-xs inline-flex items-center gap-1 mb-3" style="color:var(--ex-ink-soft)">${EX.icon('chevron-left','w-3.5 h-3.5')} Employees</a>
   <div class="flex items-start justify-between flex-wrap gap-3 mb-4">
     <div class="flex items-center gap-3">${EX.avatar(e.name,44)}<div><h1 class="font-display text-lg font-bold">${e.name}${e._demo?EX.demoPill:''}</h1>
       <div class="text-xs" style="color:var(--ex-ink-soft)">${(EX.ROLES[e.role]||{}).label||e.role} · ${e.department||'—'} ${EX.pill(e.status)}</div></div></div>
     <div class="flex gap-2">
-      ${EX.can('employees') ? `<button onclick="EX.setupLogin('${e.id}')" class="ex-btn ex-btn-ghost">${EX.icon('lock','w-4 h-4')} Set up login</button>` : ''}
+      ${EX.canManageMembers() ? `<button onclick="EX.setupLogin('${e.id}')" class="ex-btn ex-btn-ghost">${EX.icon('lock','w-4 h-4')} Set up login</button>` : ''}
       <button onclick="EX.showEmpModal('${e.id}')" class="ex-btn ex-btn-ghost">${EX.icon('edit','w-4 h-4')} Edit profile</button>
     </div>
   </div>
@@ -4452,6 +4614,7 @@ EX.employeeDetail = function(id){
     <div class="ex-card p-4"><div class="ex-label mb-2">This month at a glance</div>
       <div class="text-2xl font-display font-bold tnum">${stats.productivityScore}<span class="text-xs font-normal" style="color:var(--ex-ink-soft)"> / 100 score</span></div>
       <div class="text-xs mt-1" style="color:var(--ex-ink-soft)">${stats.tasksCompleted}/${stats.tasksAssigned} tasks · ${stats.daysPresent} days present · ${stats.hoursWorked}h logged</div>
+      <div class="text-xs mt-1" style="color:var(--ex-ink-soft)">${stats.achievements} achievement${stats.achievements===1?'':'s'} · ${stats.escalations} escalation${stats.escalations===1?'':'s'}${stats.escalationsOpen?` (${stats.escalationsOpen} open)`:''}</div>
     </div>
   </div>` : ''}
   ${tab==='projects'?`<div class="ex-card p-4 mb-4"><div class="font-semibold text-sm mb-2">Currently working with (${myClients.length} client${myClients.length===1?'':'s'})</div>
@@ -4463,7 +4626,8 @@ EX.employeeDetail = function(id){
     <tbody>${myAssets.length? myAssets.map(a=>`<tr><td>${a.name}${a._demo?EX.demoPill:''}</td><td>${a.category||'—'}</td><td class="tnum">${a.serialNumber||'—'}</td><td>${EX.fmtDate(a.assignedDate)}</td><td>${a.condition||'—'}</td><td>${EX.pill(a.status)}</td>
       <td class="flex gap-1"><button onclick="EX.showAssetModal('${a.id}')" class="ex-btn ex-btn-ghost ex-btn-sm !p-1.5">${EX.icon('edit','w-3.5 h-3.5')}</button><button onclick="EX.returnAsset('${a.id}')" class="ex-btn ex-btn-ghost ex-btn-sm">Return</button></td>
     </tr>`).join('') : `<tr><td colspan="7">${EX.empty('No company assets issued to this employee')}</td></tr>`}</tbody></table></div>` : ''}
-  ${tab==='performance'?EX.monthlyReviewDashboard({focusEmployeeId:id}):''}
+  ${tab==='escalations'?EX.recTab(e,'escalation'):''}${tab==='achievements'?EX.recTab(e,'achievement'):''}
+  ${tab==='performance'?EX.monthlyReviewDashboard({focusEmployeeId:id})+EX.recMonthSection(e, EX.ui.reviewMonth||EX.monthKey()):''}
   `;
 };
 
@@ -4582,9 +4746,9 @@ EX.views['workreport'] = function(){
     </tbody></table></div></div>
     <div class="text-xs mt-2" style="color:var(--ex-ink-soft)">${EX.canEditDeliverables()?'You can edit committed quantities here or in each client\'s Content tab.':'Committed quantities are view-only for your role — they are set by the Super Admin / MD, CEO / Operations Head.'}</div>`;
   } else if(tab==='employees'){
-    body = `<div class="ex-card overflow-hidden"><div class="overflow-x-auto"><table class="ex-table"><thead><tr><th>Employee</th><th>Role</th><th class="text-right">Tasks done</th><th class="text-right">On time</th><th class="text-right">Content delivered</th><th class="text-right">Days present</th><th class="text-right">EOD reports</th><th class="text-right">Score</th></tr></thead><tbody>
+    body = `<div class="ex-card overflow-hidden"><div class="overflow-x-auto"><table class="ex-table"><thead><tr><th>Employee</th><th>Role</th><th class="text-right">Tasks done</th><th class="text-right">On time</th><th class="text-right">Content delivered</th><th class="text-right">Days present</th><th class="text-right">EOD reports</th>${EX.canManageRecords()?'<th class="text-right">Achiev.</th><th class="text-right">Escal.</th>':''}<th class="text-right">Score</th></tr></thead><tbody>
     ${d.empRows.map(r=>`<tr style="cursor:pointer" onclick="EX.route('employees','${r.emp.id}')"><td><div class="flex items-center gap-2">${EX.avatar(r.emp.name,24)}<span class="font-medium">${EX.esc(r.emp.name)}</span></div></td><td>${EX.esc((EX.ROLES[r.emp.role]||{}).label||r.emp.role)}</td>
-      <td class="text-right tnum">${r.st.tasksCompleted} / ${r.st.tasksAssigned}</td><td class="text-right tnum">${r.st.tasksCompleted? Math.round(r.st.onTimeRate*100)+'%':'—'}</td><td class="text-right tnum">${r.contentDelivered} / ${r.contentCreated}</td><td class="text-right tnum">${r.st.daysPresent}</td><td class="text-right tnum">${r.st.eodDays}</td><td class="text-right tnum font-semibold">${r.st.productivityScore}</td></tr>`).join('') || `<tr><td colspan="8">${EX.empty('No employees to show')}</td></tr>`}
+      <td class="text-right tnum">${r.st.tasksCompleted} / ${r.st.tasksAssigned}</td><td class="text-right tnum">${r.st.tasksCompleted? Math.round(r.st.onTimeRate*100)+'%':'—'}</td><td class="text-right tnum">${r.contentDelivered} / ${r.contentCreated}</td><td class="text-right tnum">${r.st.daysPresent}</td><td class="text-right tnum">${r.st.eodDays}</td>${EX.canManageRecords()?`<td class="text-right tnum">${r.st.achievements}</td><td class="text-right tnum">${r.st.escalations}</td>`:''}<td class="text-right tnum font-semibold">${r.st.productivityScore}</td></tr>`).join('') || `<tr><td colspan="10">${EX.empty('No employees to show')}</td></tr>`}
     </tbody></table></div></div>`;
   } else {
     body = EX.dataTable({id:'wrLog', rows:d.log, searchKey:l=>`${l.title} ${l.client} ${l.who} ${l.kind}`, columns:[
