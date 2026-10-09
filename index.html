@@ -196,7 +196,7 @@ EX.NAV = [
  ]},
  {group:'Clients & Delivery', items:[
    {key:'clients', label:'Clients', icon:'briefcase', roles:['super_admin','ops_head','sales_exec','dme','accounts','graphic_designer','video_editor']},
-   {key:'content', label:'Content Studio', icon:'image', roles:['super_admin','ops_head','creative_head','dme','graphic_designer','video_editor','parttime','intern','outsourced_editor']},
+   {key:'content', label:'Content Studio', icon:'image', roles:['super_admin','ops_head','creative_head','dme','graphic_designer','video_editor','videographer','parttime','intern','outsourced_editor']},
    {key:'shoots', label:'Video Shoots', icon:'video', roles:['super_admin','ops_head','creative_head','videographer','video_editor']},
    {key:'tasks', label:'Tasks', icon:'check-square', roles:'*'},
    {key:'taskmonitor', label:'Team Tasks', icon:'users', roles:['super_admin','creative_head']},
@@ -682,6 +682,7 @@ EX.setConfig = async function(payload){
     const existing = EX.data.companyConfig;
     if(existing) await EX.CAP.db.doc('config/company').update(payload);
     else await EX.CAP.db.doc('config/company').set(payload);
+    EX.data.companyConfig = Object.assign({}, existing||{}, payload); EX.scheduleRender();   // show it at once, even if live updates are slow
   }catch(e){
     console.warn('EX.setConfig failed', e);
     EX.toast(EX.friendlyErrorMessage(e,'Save settings'), 'bad');
@@ -3338,9 +3339,9 @@ EX.addContentModal = function(clientId){
         {key:'title',label:'Title',required:true},
         {key:'type',label:'Type',type:'select',options:EX.allContentTypes()},
         {key:'forMonth',label:'Counts towards month',type:'month',hint:'Which month\'s committed deliverables this item belongs to.'},
-        {key:'assignedTo',label:'Assigned to',type:'select',options:EX.get('employees').filter(e=>['graphic_designer','video_editor','dme','dm_manager','parttime','intern','outsourced_editor'].includes(e.role)).map(e=>({value:e.id,label:e.name}))},
+        {key:'assignedTo',label:'Assigned to',type:'select',options:EX.assigneeOptions()},
         {key:'deadline',label:'Deadline',type:'date'},
-      ],{forMonth:EX.ui.contentMonth||EX.monthKey()},2)}
+      ],{forMonth:EX.ui.contentMonth||EX.monthKey(), assignedTo:(EX.canAssignOthers()?'':EX.session.employeeId)},2)}
       <div class="flex justify-end gap-2 pt-2"><button type="button" class="ex-btn ex-btn-ghost" onclick="EX.closeModal()">Cancel</button><button class="ex-btn ex-btn-primary">Create</button></div>
     </form>`);
 };
@@ -3348,9 +3349,11 @@ EX.saveContent = async function(ev, clientId){
   ev.preventDefault();
   const data = EX.readForm(ev.target, [{key:'title'},{key:'type'},{key:'forMonth'},{key:'assignedTo'},{key:'deadline',type:'date'}]);
   if(!/^\d{4}-\d{2}$/.test(data.forMonth||'')) data.forMonth = data.deadline? EX.monthKey(new Date(data.deadline)) : (EX.ui.contentMonth||EX.monthKey());
+  if(!EX.canAssignOthers()) data.assignedTo = EX.session.employeeId;
   data.clientId = clientId; data.status='Draft'; data.comments=[]; data.clientApproval='Pending';
   const id = await EX.add('content', data);
-  if(data.assignedTo) await EX.addNotification({targetEmployeeId:data.assignedTo, message:`New content assigned: ${data.title}`, link:'content'});
+  if(data.assignedTo) await EX.ensureContentTask(id);
+  if(data.assignedTo && data.assignedTo!==EX.session.employeeId) await EX.addNotification({targetEmployeeId:data.assignedTo, message:`New content assigned: ${data.title}`, link:'content'});
   await EX.addAudit('Created content item','content',id,null,data);
   EX.closeModal(); EX.toast('Content item created','good');
 };
@@ -3367,6 +3370,7 @@ EX.openContentDrawer = function(id){
       <div class="flex flex-wrap gap-1.5 mb-4">${EX.CONTENT_STATUSES.map(s=>`<button onclick="EX.setContentStatus('${id}','${s}')" class="ex-btn ex-btn-sm ${x.status===s?'ex-btn-primary':'ex-btn-ghost'}">${s}</button>`).join('')}</div>
       <div class="ex-label">Client approval <span class="font-normal" style="color:var(--ex-ink-soft)">— what the client has said about this item</span></div>
       <div class="flex flex-wrap gap-1.5 mb-4">${EX.CLIENT_APPROVALS.map(a=>`<button onclick="EX.setClientApproval('${id}','${a}')" class="ex-btn ex-btn-sm ${appr===a?(a==='Approved'?'ex-btn-primary':a==='Re-work'?'ex-btn-danger':'ex-btn-primary'):'ex-btn-ghost'}">${a}</button>`).join('')}</div>
+      ${EX.canAssignOthers()?`<div class="mb-4"><label class="ex-label">Assigned to <span class="font-normal" style="color:var(--ex-ink-soft)">— also moves the linked task</span></label><select id="contentAssignee" onchange="EX.setContentAssignee('${id}',this.value)" class="ex-select">${EX.assigneeOptions(x.assignedTo).map(o=>`<option value="${EX.esc(o.value)}" ${o.value===(x.assignedTo||'')?'selected':''}>${EX.esc(o.label)}</option>`).join('')}</select></div>`:''}
       <div class="grid grid-cols-2 gap-3 mb-4"><div><label class="ex-label">Counts towards month</label><input type="month" value="${EX.contentMonth(x)}" onchange="EX.setContentForMonth('${id}',this.value)" class="ex-input"/></div></div>
       ${EX.contentLinkedTasksBlock(x)}
       <div class="ex-label">Comments</div>
@@ -3387,6 +3391,7 @@ EX.setContentStatus = async function(id, status){
   if(isLate && !x.lateReason){ EX.closeModal(); return EX.lateReasonModal(id, status); }
   const sync = EX.approvalForStatus(status);
   await EX.patch('content', id, Object.assign({status}, sync?{clientApproval:sync}:{}));
+  await EX.syncTasksFromContent(id);
   await EX.addAudit('Content status changed','content',id,{status:x.status},{status});
   EX.closeModal(); EX.toast(`Status → ${status}`,'good');
 };
@@ -3401,6 +3406,7 @@ EX.saveLateReason = async function(ev,id,status){
   ev.preventDefault();
   const reason = new FormData(ev.target).get('reason');
   await EX.patch('content', id, Object.assign({status, lateReason:reason}, EX.approvalForStatus(status)?{clientApproval:EX.approvalForStatus(status)}:{}));
+  await EX.syncTasksFromContent(id);
   await EX.addAudit('Content delivered late','content',id,null,{reason});
   EX.closeModal(); EX.toast('Status updated','good');
 };
@@ -3746,6 +3752,7 @@ EX.setClientApproval = async function(id, val){
   if(val==='Re-work' && ['Draft','Submitted','Approved'].includes(x.status)) { patch.status = 'Revision'; patch.revisionCount = (x.revisionCount||0)+1; }
   if(val==='Pending' && ['Approved','Revision','Rejected'].includes(x.status)) patch.status = 'Submitted';
   try{ await EX.patch('content', id, patch); }catch(e){ return; }
+  await EX.syncTasksFromContent(id);
   await EX.addAudit('Client approval recorded','content',id,{clientApproval:EX.contentApproval(x)},{clientApproval:val});
   EX.toast('Client approval: '+val, val==='Approved'?'good':val==='Re-work'?'warn':'good');
   if(EX.byId('content',id) && document.getElementById('contentDrawerRoot')) EX.openContentDrawer(id);
@@ -3851,7 +3858,13 @@ EX.assignableEmployees = function(keepId){
   if(keepId && !list.some(e=>e.id===keepId)){ const k = EX.byId('employees', keepId); if(k) list.push(k); }
   return list.sort((a,b)=>(a.name||'').localeCompare(b.name||''));
 };
-EX.assigneeOptions = (keepId)=> [{value:'',label:'— Unassigned —'}].concat(EX.assignableEmployees(keepId).map(e=>({value:e.id,label:`${e.name} — ${(EX.ROLES[e.role]||{}).label||e.role||''}`})));
+EX.assigneeOptions = function(keepId){
+  if(!EX.canAssignOthers()){   // Interns / Part-timers: only themselves (or, when editing, the person the task already belongs to)
+    const e = EX.byId('employees', keepId || EX.session.employeeId);
+    return e? [{value:e.id,label:`${e.name} — ${(EX.ROLES[e.role]||{}).label||e.role||''}${e.id===EX.session.employeeId?' (you)':''}`}] : [];
+  }
+  return [{value:'',label:'— Unassigned —'}].concat(EX.assignableEmployees(keepId).map(e=>({value:e.id,label:`${e.name} — ${(EX.ROLES[e.role]||{}).label||e.role||''}${e.id===EX.session.employeeId?' (you)':''}`})));
+};
 EX.taskCreatorLabel = (t)=> t._createdByName || t.createdByName || '—';
 EX.taskActionCell = (t)=> EX.canDelete()? `<button title="Delete task" onclick="event.stopPropagation();EX.deleteTask('${t.id}')" class="ex-btn ex-btn-ghost ex-btn-sm !p-1.5" style="color:var(--ex-bad)">${EX.icon('trash','w-4 h-4')}</button>` : '';
 EX.deleteTask = function(id){
@@ -3863,14 +3876,17 @@ EX.deleteTask = function(id){
     EX.toast('Task deleted','good');
   }, true);
 };
-EX.canCreateTasks = function(role){ role = role || EX.currentRole(); return !['intern','parttime'].includes(role); };
+// EVERY signed-in team member can create a task. Interns and Part-timers can only create tasks for themselves;
+// everyone else can assign to any active team member.
+EX.canCreateTasks = function(role){ return true; };
+EX.canAssignOthers = function(role){ role = role || EX.currentRole(); return !['intern','parttime'].includes(role); };
 EX.views['tasks'] = function(){
   const role = EX.currentRole();
   const isManager = ['super_admin','ops_head','creative_head'].includes(role);
   let items = EX.activeTasks();
-  if(!isManager) items = items.filter(t=>t.assignedTo===EX.session.employeeId);
+  if(!isManager) items = items.filter(t=>t.assignedTo===EX.session.employeeId || t._createdBy===EX.session.employeeId);
   items = items.map(t=>Object.assign({},t,{clientName:(EX.byId('clients',t.clientId)||{}).companyName||''}));
-  return `${EX.pageHead('Tasks', isManager?'All tasks across the team':'Tasks assigned to you', EX.canCreateTasks(role)?`<button onclick="EX.showAddTaskModal()" class="ex-btn ex-btn-primary">${EX.icon('plus','w-4 h-4')} New task</button>`:'')}
+  return `${EX.pageHead('Tasks', isManager?'All tasks across the team':'Tasks assigned to you, and tasks you created', EX.canCreateTasks(role)?`<button onclick="EX.showAddTaskModal()" class="ex-btn ex-btn-primary">${EX.icon('plus','w-4 h-4')} New task</button>`:'')}
   ${EX.archiveNote()}
   ${EX.dataTable({id:'tasksGlobal', rows:items, searchKey:t=>`${t.title} ${t.clientName} ${t.assignedToName||''}`, filterOptions:EX.TASK_STATUSES, filterKey:t=>t.status, filterLabel:'status', rowClick:t=>`EX.openTaskDrawer('${t.id}')`,
     columns:[{label:'Task',get:t=>t.title},{label:'Client',get:t=>t.clientName||'—'},{label:'Type',get:t=>t.type||'—'},{label:'Assigned',get:t=>t.assignedToName||'—'},{label:'Content',get:t=>EX.taskContentCell(t)},
@@ -3885,13 +3901,17 @@ EX.showAddTaskModal = function(taskId, clientId){
     return f;
   });
   EX.openModal(`${EX.modalHeader(taskId?'Edit task':'New task')}
-    <form onsubmit="EX.saveTask(event${taskId?`,'${taskId}'`:''})" class="p-5 max-h-[70vh] overflow-y-auto">${EX.formGrid(fields, t||{priority:'Medium'}, 2)}${EX.taskContentSection(t)}
+    <form onsubmit="EX.saveTask(event${taskId?`,'${taskId}'`:''})" class="p-5 max-h-[70vh] overflow-y-auto">${EX.formGrid(fields, t||{priority:'Medium', assignedTo:(EX.canAssignOthers()?'':EX.session.employeeId)}, 2)}${EX.taskContentSection(t)}
     <div class="flex justify-end gap-2 pt-3 mt-2 border-t" style="border-color:var(--ex-line)"><button type="button" class="ex-btn ex-btn-ghost" onclick="EX.closeModal()">Cancel</button><button class="ex-btn ex-btn-primary">Save</button></div></form>`,{wide:true});
   EX.wireTaskContentSelect(); EX.refreshAssignees();
 };
 EX.saveTask = async function(ev, taskId){
   ev.preventDefault();
   const data = EX.readForm(ev.target, EX.TASK_FIELDS);
+  if(!EX.canAssignOthers()){   // Interns / Part-timers keep tasks on themselves
+    const prev = taskId? EX.byId('tasks', taskId) : null;
+    data.assignedTo = prev? (prev.assignedTo||EX.session.employeeId) : EX.session.employeeId;
+  }
   const emp = data.assignedTo? EX.byId('employees', data.assignedTo) : null;
   if(emp && !EX.canAssignTo(emp)){ EX.toast(`You are not permitted to assign tasks to ${emp.name}.`, 'bad'); return; }
   data.assignedToName = emp? emp.name : null;
@@ -3908,15 +3928,19 @@ EX.saveTask = async function(ev, taskId){
     if(!data.clientId){ EX.toast('Pick a client first — a new content item has to belong to a client.','bad'); return; }
     const cdata = {title:data.title, type:newType, clientId:data.clientId, assignedTo:data.assignedTo||'', deadline:data.deadline||null,
       forMonth: data.deadline? EX.monthKey(new Date(data.deadline)) : (EX.ui.contentMonth||EX.monthKey()), status:'Draft', comments:[], clientApproval:'Pending'};
+    cdata.taskSynced = true;
     const cid = await EX.add('content', cdata);
     await EX.addAudit('Created content item (from task)','content',cid,null,cdata);
     data.contentId = cid;
   } else {
     data.contentId = null;
   }
-  if(taskId){ await EX.patch('tasks', taskId, data); }
+  if(taskId){ await EX.patch('tasks', taskId, data);
+    // keep the linked content item's owner in step with the task
+    if(data.contentId){ const cx = EX.byId('content', data.contentId); if(cx && (cx.assignedTo||'')!==(data.assignedTo||'')){ try{ await EX.patch('content', cx.id, {assignedTo:data.assignedTo||''}); }catch(e){} } }
+  }
   else { data.status='To Do'; data.revisionCount=0; const id = await EX.add('tasks', data);
-    if(data.assignedTo) await EX.addNotification({targetEmployeeId:data.assignedTo, message:`New task assigned: ${data.title}`, link:'tasks'});
+    if(data.assignedTo && data.assignedTo!==EX.session.employeeId) await EX.addNotification({targetEmployeeId:data.assignedTo, message:`New task assigned: ${data.title}`, link:'tasks'});
   }
   EX.closeModal(); EX.toast('Saved','good');
 };
@@ -3945,6 +3969,7 @@ EX.setTaskStatus = async function(id, status){
   const patch = {status};
   if(status==='Done') patch.completedAt = EX.now();
   await EX.patch('tasks', id, patch);
+  await EX.syncContentFromTask(id);
   EX.closeModal(); EX.toast(`Status → ${status}`,'good');
 };
 EX.setTaskActualHours = async function(id, val){ await EX.patch('tasks', id, {actualHours: val?Number(val):null}); EX.toast('Hours logged','good'); };
@@ -5067,7 +5092,7 @@ EX.workReportData = function(ym){
     return {emp:e, st, contentCreated:mine.length, contentDelivered:mine.filter(x=>EX.isDelivered(x)||EX.contentApproval(x)==='Approved').length, contentApproved:mine.filter(x=>EX.contentApproval(x)==='Approved').length};
   });
   const log = [];
-  EX.get('tasks').forEach(t=>{ if(t.status==='Done' && t.completedAt && EX.monthKey(new Date(t.completedAt))===ym && inScope(t.assignedTo))
+  EX.get('tasks').forEach(t=>{ if(t.status==='Done' && t.completedAt && EX.monthKey(new Date(t.completedAt))===ym && inScope(t.assignedTo) && !(t.contentId && EX.byId('content', t.contentId)))
     log.push({date:t.completedAt, kind:'Task', title:t.title, client:(EX.byId('clients',t.clientId)||{}).companyName||'', who:t.assignedToName||((EX.byId('employees',t.assignedTo)||{}).name)||'', status:'Done'}); });
   EX.get('content').forEach(x=>{ if(EX.contentMonth(x)===ym && (EX.isDelivered(x)||EX.contentApproval(x)==='Approved') && inScope(x.assignedTo))
     log.push({date:x.clientApprovalAt||x._updatedAt||x._createdAt||0, kind:'Content ('+(x.type||'—')+')', title:x.title, client:(EX.byId('clients',x.clientId)||{}).companyName||'', who:((EX.byId('employees',x.assignedTo)||{}).name)||x._createdByName||'', status:EX.contentApproval(x)==='Approved'?'Approved':x.status}); });
@@ -5456,9 +5481,9 @@ EX.eodBuild = function(empId, day){
   const endTs = new Date(day+'T23:59:59.999').getTime();
   const mine = EX.get('tasks').filter(t=> t.assignedTo===empId && (!t._createdAt || t._createdAt<=endTs));
   const item = (t, extra)=> Object.assign(EX.eodItem(t, day), extra||{});
-  const completed = mine.filter(t=> t.status==='Done' && t.completedAt && EX.dayKeyOf(t.completedAt)===day).map(t=>item(t));
+  const completed = mine.filter(t=> t.status==='Done' && EX.taskDoneAt(t) && EX.dayKeyOf(EX.taskDoneAt(t))===day).map(t=>item(t));
   // open at the end of that day: not done yet, or finished only after that day
-  const openAt = mine.filter(t=> t.status!=='Done' || (t.completedAt && t.completedAt>endTs));
+  const openAt = mine.filter(t=> t.status!=='Done' || (EX.taskDoneAt(t) && EX.taskDoneAt(t)>endTs));
   const incomplete = openAt.map(t=> t.status==='Done'? item(t,{status:'In Progress'}) : item(t))
     .sort((a,b)=> (b.overdue?1:0)-(a.overdue?1:0) || (a.deadline||9e15)-(b.deadline||9e15));
   const assigned = mine.filter(t=> (t._createdAt && EX.dayKeyOf(t._createdAt)===day) || (t.deadline && EX.utcDayKey(t.deadline)===day))
@@ -5470,8 +5495,12 @@ EX.eodSnapshot = function(empId, day){
   d.generatedAt = EX.now(); d.auto = true; d.reconstructed = day < EX.todayKey();
   return d;
 };
+EX.eodSig = (d)=> JSON.stringify(['assigned','completed','incomplete'].map(k=>(d[k]||[]).map(i=>i.id+':'+i.status+':'+(i.contentApproval||'')).sort()));
 EX.eodGet = function(empId, day){
   const a = EX.byId('attendance', empId); const snap = a && a['eod_'+day];
+  // TODAY is always built live from the task records, so a task assigned (or finished) a minute ago is in the report straight away.
+  // A saved copy is kept in step by the background sweep, and a past day shows the copy saved at the end of that day.
+  if(day===EX.todayKey()){ const d = EX.eodBuild(empId, day); d.stored = !!(snap && snap.day===day); d.live = true; d.reconstructed = false; d.generatedAt = snap&&snap.generatedAt; return d; }
   if(snap && snap.day===day) return Object.assign({}, snap, {stored:true});
   const d = EX.eodBuild(empId, day); d.stored = false; d.live = day===EX.todayKey(); d.reconstructed = day < EX.todayKey();
   return d;
@@ -5525,7 +5554,17 @@ EX.autoEodSweep = async function(){
     for(const e of emps) for(const day of days){
       if(EX.isWeeklyOff(new Date(day+'T00:00:00'))) continue;
       const a = EX.byId('attendance', e.id);
-      if(a && a['eod_'+day]) continue;
+      const old = a && a['eod_'+day];
+      if(old){
+        // keep the saved copy honest: today's copy follows later changes, and a past day's copy that was saved before that day
+        // ended is closed once with the end-of-day state
+        const dayEnd = new Date(day+'T23:59:59.999').getTime();
+        const isToday = day===EX.todayKey();
+        const stale = isToday? (EX.eodSig(old) !== EX.eodSig(EX.eodBuild(e.id, day))) : ((old.generatedAt||0) < dayEnd);
+        if(!stale) continue;
+        await EX.writeEodSnapshot(e.id, day, EX.eodSnapshot(e.id, day)); n++;
+        continue;
+      }
       const snap = EX.eodSnapshot(e.id, day);
       if(!snap.assigned.length && !snap.completed.length && !snap.incomplete.length) continue;   // nothing to report
       await EX.writeEodSnapshot(e.id, day, snap); n++;
@@ -5552,9 +5591,9 @@ EX.eodReportHtml = function(empId, day){
   const d = EX.eodGet(empId, day); const g = EX.eodGroups(d); const c = EX.eodCounts(d);
   const rec = EX.attDay(empId, day); const note = rec.eod || {};
   const tile = (l,v,tone)=> `<div class="ex-card p-3"><div class="text-[11px]" style="color:var(--ex-ink-soft)">${l}</div><div class="font-display font-bold text-xl tnum" ${tone?`style="color:var(--ex-${tone})"`:''}>${v}</div></div>`;
-  const banner = d.stored
+  const banner = (d.stored && !d.live)
     ? `Generated automatically ${EX.fmtDateTime(d.generatedAt)} from the task records${d.reconstructed?' (rebuilt later from the task statuses at that time)':''}.`
-    : (d.live ? `Live view of today — the final report is generated automatically at ${EX.eodTime()}.` : 'No saved report for this day — rebuilt from the current task records.');
+    : (d.live ? `Live view of today — always up to date with the task records; a saved copy is kept automatically from ${EX.eodTime()}.` : 'No saved report for this day — rebuilt from the current task records.');
   return `<div id="eodReport">
     <div class="text-xs mb-3" style="color:var(--ex-ink-soft)">${rec.checkIn?`Checked in ${EX.timeOnly(rec.checkIn)}`:'No check-in recorded'}${rec.checkOut?` · Checked out ${EX.timeOnly(rec.checkOut)} · ${rec.hours||0}h`:''} · ${banner}</div>
     <div class="grid grid-cols-2 md:grid-cols-6 gap-3 mb-4">${tile('Assigned today',c.assigned)}${tile('Completed',c.completed,'good')}${tile('In progress',c.inProgress)}${tile('Pending',c.pending)}${tile('On hold / approval',c.onHold)}${tile('Incomplete',c.incomplete,c.incomplete?'warn':'')}</div>
@@ -5664,6 +5703,80 @@ EX.downloadTeamEodPdf = async function(day){
     rows.map(r=>[r.e.name, r.c.assigned, r.c.completed, r.c.inProgress, r.c.pending, r.c.onHold, r.c.incomplete]));
   active.forEach(r=>EX.eodBlock(doc, r.e, day));
   await EX.saveDoc(doc, `Team-EOD-${day}.pdf`);
+};
+
+
+/* ================= CONTENT STUDIO <-> TASKS <-> EOD SYNC ================= */
+// A content item that has an owner always has a task for that owner, so it shows in their Tasks and EOD report.
+// Statuses are kept in step both ways (the client-approval answer is only ever set from the content side):
+//   content Approved / Scheduled / Published -> task Done        content Submitted -> task Review (if it was not started/finished)
+//   content Revision / Rejected -> task Revision (reopens a finished task)
+//   task Review / Done -> content Submitted (only from Draft / Revision / Rejected)
+EX.linkedTasks = (contentId)=> EX.get('tasks').filter(t=>t.contentId===contentId);
+EX.taskTypeForContent = (ct)=> EX.TASK_TYPES.includes(ct)? ct : (/video|edit/i.test(ct||'')? 'Editing' : 'Other');
+EX.ensureContentTask = async function(contentId, opts){
+  opts = opts || {};
+  const x = EX.byId('content', contentId); if(!x || !x.assignedTo || x.taskSynced) return null;
+  if(EX.linkedTasks(x.id).length){ try{ await EX.patch('content', x.id, {taskSynced:true}); }catch(e){} return null; }
+  const emp = EX.byId('employees', x.assignedTo); if(!emp || emp.status==='Removed') return null;
+  const st = ({Submitted:'Review',Approved:'Done',Scheduled:'Done',Published:'Done',Revision:'Revision',Rejected:'Revision'})[x.status] || 'To Do';
+  const tid = 'ct_'+x.id;
+  await EX.setId('tasks', tid, {title:x.title, clientId:x.clientId||'', type:EX.taskTypeForContent(x.type), assignedTo:emp.id, assignedToName:emp.name, priority:'Medium',
+    deadline:x.deadline||null, status:st, revisionCount:x.revisionCount||0, contentId:x.id, autoFromContent:true,
+    completedAt: st==='Done'? (x.clientApprovalAt||x._updatedAt||EX.now()) : null,
+    _createdAt: opts.keepDate? (x._createdAt||EX.now()) : EX.now(), _createdBy:x._createdBy||'', _createdByName:x._createdByName||''});
+  try{ await EX.patch('content', x.id, {taskSynced:true}); }catch(e){}
+  return tid;
+};
+EX.syncTasksFromContent = async function(contentId){
+  try{
+    const x = EX.byId('content', contentId); if(!x) return;
+    for(const t of EX.linkedTasks(contentId)){
+      let to = null;
+      if(['Approved','Scheduled','Published'].includes(x.status)) to = t.status!=='Done'? 'Done' : null;
+      else if(['Revision','Rejected'].includes(x.status)) to = ['Done','Review','To Do'].includes(t.status)? 'Revision' : null;
+      else if(x.status==='Submitted') to = ['To Do','In Progress','Revision'].includes(t.status)? 'Review' : null;
+      if(!to) continue;
+      const patch = {status:to}; if(to==='Done') patch.completedAt = EX.now();
+      if(to==='Revision' && t.status==='Done') patch.revisionCount = (t.revisionCount||0)+1;
+      await EX.patch('tasks', t.id, patch);
+    }
+  }catch(e){ console.warn('content->task sync', e); }
+};
+EX.syncContentFromTask = async function(taskId){
+  try{
+    const t = EX.byId('tasks', taskId); if(!t || !t.contentId) return;
+    const x = EX.byId('content', t.contentId); if(!x) return;
+    if(['Review','Done'].includes(t.status) && ['Draft','Revision','Rejected'].includes(x.status))
+      await EX.patch('content', x.id, {status:'Submitted', clientApproval:'Pending'});
+  }catch(e){ console.warn('task->content sync', e); }
+};
+// Content owner change (drawer): the content, its tasks and the new owner's notification move together.
+EX.setContentAssignee = async function(id, empId){
+  const x = EX.byId('content', id); if(!x) return;
+  if(!EX.canAssignOthers()){ EX.toast('You cannot reassign content.','bad'); return; }
+  const emp = empId? EX.byId('employees', empId) : null;
+  await EX.patch('content', id, {assignedTo: empId||''});
+  for(const t of EX.linkedTasks(id)) await EX.patch('tasks', t.id, {assignedTo: empId||null, assignedToName: emp? emp.name : null});
+  if(empId){ await EX.ensureContentTask(id); if(empId!==EX.session.employeeId) await EX.addNotification({targetEmployeeId:empId, message:`Content assigned: ${x.title}`, link:'content'}); }
+  EX.toast('Assigned','good'); if(document.getElementById('contentDrawerRoot')) EX.openContentDrawer(id);
+};
+// Managers' sessions give older content items that already have an owner (but no task) a task, once.
+EX._ctBusy = false;
+EX.backfillContentTasks = async function(){
+  if(EX._ctBusy || EX.session.mode!=='staff') return 0;
+  if(!['super_admin','ops_head','creative_head'].includes(EX.currentRole())) return 0;
+  if(!(EX._loaded && EX._loaded.content && EX._loaded.tasks && EX._loaded.employees)) return 0;
+  EX._ctBusy = true; let n = 0;
+  try{
+    for(const x of EX.get('content').slice()){
+      if(!x.assignedTo || x.taskSynced) continue;
+      if(['Approved','Scheduled','Published','Rejected'].includes(x.status)) { continue; }   // finished work does not need a new to-do
+      if(await EX.ensureContentTask(x.id, {keepDate:true})) n++;
+    }
+  }catch(e){ console.warn('content task backfill', e); }
+  finally{ EX._ctBusy = false; }
+  return n;
 };
 
 /* ================= CLIENT CREDENTIALS VAULT ================= */
@@ -5786,7 +5899,12 @@ EX.vaultRemove = function(cid, eid){
 
 /* ---- keep every screen current: the browser re-reads the live collections every 30 s, and everything on focus ---- */
 EX.POLL_FAST = ['tasks','content','employees','notifications','clients','attendance'];
+EX.reloadCompanyConfig = async function(){
+  try{ if(!EX.CAP.db) return; const snap = await EX.CAP.db.doc('config/company').get(); const next = snap.exists? snap.data() : null;
+    if(JSON.stringify(next)!==JSON.stringify(EX.data.companyConfig)){ EX.data.companyConfig = next; EX.scheduleRender(); } }catch(e){}
+};
 EX.pollNow = function(cols){
+  if(!cols || cols.includes('config')) EX.reloadCompanyConfig();   // company settings (EOD time, targets, ...) also follow other people's changes
   if(!EX._reload) return;
   (cols || Object.keys(EX._reload)).forEach(c=>{ try{ if(EX._reload[c]) EX._reload[c](); }catch(e){} });
 };
@@ -5798,6 +5916,8 @@ window.addEventListener('focus', ()=>{ if(EX.session.mode) EX.pollNow(); });
 /* ---- background scheduler for the automatic EOD snapshot ---- */
 setInterval(()=>{ try{ EX.autoEodSweep(); }catch(e){} }, 60000);
 setTimeout(()=>{ try{ EX.autoEodSweep(); }catch(e){} }, 6000);
+setInterval(()=>{ try{ EX.backfillContentTasks(); }catch(e){} }, 60000);
+setTimeout(()=>{ try{ EX.backfillContentTasks(); }catch(e){} }, 9000);
 
 /* ================= LEAVE & WFH ================= */
 EX.views['leave'] = function(){
