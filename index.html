@@ -199,6 +199,8 @@ EX.NAV = [
    {key:'content', label:'Content Studio', icon:'image', roles:['super_admin','ops_head','creative_head','dme','graphic_designer','video_editor','parttime','intern','outsourced_editor']},
    {key:'shoots', label:'Video Shoots', icon:'video', roles:['super_admin','ops_head','creative_head','videographer','video_editor']},
    {key:'tasks', label:'Tasks', icon:'check-square', roles:'*'},
+   {key:'taskmonitor', label:'Team Tasks', icon:'users', roles:['super_admin','creative_head']},
+   {key:'taskhistory', label:'Task History', icon:'calendar', roles:'*'},
    {key:'workreport', label:'Work Report', icon:'bar-chart', roles:'*'},
    {key:'workload', label:'Team Workload', icon:'layers', roles:['super_admin','ops_head','hr','sales_exec','creative_head']},
    {key:'support', label:'Support Desk', icon:'life-buoy', roles:['super_admin','ops_head','accounts','dme']},
@@ -352,6 +354,7 @@ EX.watchCollection = function(name){
   try{
     EX.CAP.db.collection(name).onSnapshot((snap)=>{
       EX.data[name] = snap.docs.map(d=> Object.assign({id:d.id}, d.data()));
+      (EX._loaded = EX._loaded || {})[name] = true;
       EX.dbReady = true;
       if(name==='employees') EX.employeesReady = true;
       EX.scheduleRender();
@@ -1131,6 +1134,7 @@ EX.maybeAutoCompleteBootstrap = async function(){
   await EX.completeBootstrapOnce(EX.authEmail);
 };
 EX.signOut = function(){
+  if(EX.vaultReset) EX.vaultReset();
   if(EX.sb){ try{ EX.sb.auth.signOut(); }catch(e){} }
   EX.authEmail = null;
   EX.session = {mode:null, employeeId:null, portalClientId:null};
@@ -1849,9 +1853,9 @@ EX.employeeMonthStats = function(empId, ym){
     else if(rec.status==='Leave') leaveSet.add(d);
     else if(rec.status==='WFH') wfhSet.add(d);
     if(rec.hours) hoursWorked += rec.hours;
-    if(rec.eod && rec.eod.summary) eodDays++;
   });
   wfhSet.forEach(d=> attended.add(d));
+  eodDays = EX.eodDaysInMonth(empId, ym);
   const tasks = EX.get('tasks').filter(t=> t.assignedTo===empId && t._createdAt && EX.monthKey(new Date(t._createdAt))===ym);
   const completed = tasks.filter(t=> t.status==='Done');
   const onTime = completed.filter(t=> t.deadline && t.completedAt && t.completedAt<=t.deadline);
@@ -2877,6 +2881,7 @@ EX.clientDetail = function(id){
   const finance = EX.canSeeFinancials();
   let tabs = [['overview','Overview'],['services','Services'],['platforms','Platforms'],['content','Content'],['tasks','Tasks & Deliverables'],['performance','Performance'],['ads','Ads & Social'],['invoices','Billing'],['meetings','Meetings'],['extrawork','Additional Work'],['support','Support'],['health','Health & Contract']];
   if(!finance) tabs = tabs.filter(([k])=>k!=='invoices');
+  if(EX.canUseVault()) tabs.splice(3, 0, ['credentials','Credentials']);
   const activeTab = (!finance && tab==='invoices') ? 'overview' : tab;
   const health = EX.computeClientHealth(c);
   return `<a href="#/clients" class="text-xs inline-flex items-center gap-1 mb-3" style="color:var(--ex-ink-soft)">${EX.icon('chevron-left','w-3.5 h-3.5')} All clients</a>
@@ -2892,7 +2897,7 @@ EX.clientDetail = function(id){
   <div class="flex gap-1 mb-4 border-b overflow-x-auto" style="border-color:var(--ex-line)">
     ${tabs.map(([k,l])=>`<button onclick="EX.ui.clientTab='${k}';EX.scheduleRender()" class="px-3 py-2 text-sm font-medium border-b-2 -mb-px whitespace-nowrap" style="border-color:${activeTab===k?'var(--ex-blue-600)':'transparent'};color:${activeTab===k?'var(--ex-blue-600)':'var(--ex-ink-soft)'}">${l}</button>`).join('')}
   </div>
-  ${activeTab==='overview'?EX.clientOverview(c):''}${activeTab==='services'?EX.clientServicesTab(c):''}${activeTab==='platforms'?EX.clientPlatformsTab(c):''}
+  ${activeTab==='overview'?EX.clientOverview(c):''}${activeTab==='services'?EX.clientServicesTab(c):''}${activeTab==='platforms'?EX.clientPlatformsTab(c):''}${activeTab==='credentials'?EX.clientCredentialsTab(c):''}
   ${activeTab==='content'?EX.clientContentTab(c):''}${activeTab==='tasks'?EX.clientTasksTab(c):''}${activeTab==='performance'?EX.clientPerformanceTab(c):''}${activeTab==='ads'?EX.clientAdsTab(c):''}
   ${activeTab==='invoices'&&finance?EX.clientBillingTab(c):''}${activeTab==='meetings'?EX.clientMeetingsTab(c):''}${activeTab==='extrawork'?EX.clientExtraWorkTab(c):''}${activeTab==='support'?EX.clientSupportTab(c):''}${activeTab==='health'?EX.clientHealthTab(c,health):''}`;
 };
@@ -3287,6 +3292,7 @@ EX.performDeleteClient = async function(id){
       // keep accounting history readable after the client record is gone
       for(const [col] of EX.CLIENT_FINANCE_CASCADE){ for(const r of EX.get(col).filter(x=>x.clientId===id)){ await EX.patch(col, r.id, {deletedClientName:c.companyName}); } }
     }
+    if(EX.byId('config','vault_'+id)) await EX.remove('config','vault_'+id);
     await EX.remove('clients', id);
   }catch(e){ EX.toast('Delete stopped part-way — some records may already be removed. Open the client list and try the delete again.','bad'); return; }
   await EX.addAudit('Deleted client','clients',id,{companyName:c.companyName,status:c.status,monthlyFee:c.monthlyFee||0,removed},null);
@@ -3357,6 +3363,7 @@ EX.openContentDrawer = function(id){
       <div class="ex-label">Client approval <span class="font-normal" style="color:var(--ex-ink-soft)">— what the client has said about this item</span></div>
       <div class="flex flex-wrap gap-1.5 mb-4">${EX.CLIENT_APPROVALS.map(a=>`<button onclick="EX.setClientApproval('${id}','${a}')" class="ex-btn ex-btn-sm ${appr===a?(a==='Approved'?'ex-btn-primary':a==='Re-work'?'ex-btn-danger':'ex-btn-primary'):'ex-btn-ghost'}">${a}</button>`).join('')}</div>
       <div class="grid grid-cols-2 gap-3 mb-4"><div><label class="ex-label">Counts towards month</label><input type="month" value="${EX.contentMonth(x)}" onchange="EX.setContentForMonth('${id}',this.value)" class="ex-input"/></div></div>
+      ${EX.contentLinkedTasksBlock(x)}
       <div class="ex-label">Comments</div>
       <div class="space-y-2 mb-3 max-h-40 overflow-y-auto">${(x.comments||[]).map(cm=>`<div class="text-sm"><b>${EX.esc(cm.by)}:</b> ${EX.esc(cm.text)}</div>`).join('')||'<div class="text-xs" style="color:var(--ex-ink-soft)">No comments yet</div>'}</div>
       <form onsubmit="EX.addContentComment(event,'${id}')" class="flex gap-2"><input name="text" class="ex-input" placeholder="Add a comment or revision note…" required/><button class="ex-btn ex-btn-primary shrink-0">${EX.icon('send','w-3.5 h-3.5')}</button></form>
@@ -3403,14 +3410,16 @@ EX.addContentComment = async function(ev,id){
 
 /* ---- Tasks & deliverables (per client tab; full Tasks module lives in Ops) ---- */
 EX.clientTasksTab = function(c){
-  const items = EX.get('tasks').filter(t=>t.clientId===c.id);
-  const done = items.filter(t=>t.status==='Done').length;
-  const pct = items.length? Math.round(done/items.length*100) : 0;
+  const allItems = EX.get('tasks').filter(t=>t.clientId===c.id);
+  const items = allItems.filter(t=>!EX.isTaskArchived(t));
+  const archivedN = allItems.length - items.length;
+  const done = allItems.filter(t=>t.status==='Done').length;
+  const pct = allItems.length? Math.round(done/allItems.length*100) : 0;
   return `<div class="ex-card p-4 mb-3"><div class="flex items-center justify-between mb-1"><span class="text-sm font-semibold">Deliverable completion</span><span class="text-sm font-semibold tnum">${pct}%</span></div>
     <div class="h-2 rounded-full" style="background:var(--ex-line)"><div class="h-2 rounded-full" style="width:${pct}%;background:var(--ex-good)"></div></div></div>
-  <div class="flex justify-end mb-2"><button onclick="EX.showAddTaskModal(null,'${c.id}')" class="ex-btn ex-btn-primary ex-btn-sm">${EX.icon('plus','w-3.5 h-3.5')} New task</button></div>
+  <div class="flex items-center justify-between mb-2"><span class="text-xs" style="color:var(--ex-ink-soft)">${archivedN?`${archivedN} completed task${archivedN===1?'':'s'} older than ${EX.ARCHIVE_AFTER_DAYS} days kept in <a href="#/taskhistory" class="underline">Task History</a>`:''}</span><button onclick="EX.showAddTaskModal(null,'${c.id}')" class="ex-btn ex-btn-primary ex-btn-sm">${EX.icon('plus','w-3.5 h-3.5')} New task</button></div>
   ${EX.dataTable({id:'clientTasks_'+c.id, rows:items, searchKey:t=>t.title, filterOptions:EX.TASK_STATUSES, filterKey:t=>t.status, filterLabel:'status', rowClick:t=>`EX.openTaskDrawer('${t.id}')`,
-    columns:[{label:'Task',get:t=>t.title},{label:'Type',get:t=>t.type},{label:'Assigned',get:t=>t.assignedToName||'—'},{label:'Created by',get:t=>EX.taskCreatorLabel(t)},{label:'Deadline',get:t=>EX.fmtDate(t.deadline)},{label:'Status',get:t=>EX.pill(t.status)}].concat(EX.canDelete()?[{label:'',get:t=>EX.taskActionCell(t)}]:[]), emptyLabel:'No tasks yet'})}`;
+    columns:[{label:'Task',get:t=>t.title},{label:'Type',get:t=>t.type},{label:'Assigned',get:t=>t.assignedToName||'—'},{label:'Content',get:t=>EX.taskContentCell(t)},{label:'Created by',get:t=>EX.taskCreatorLabel(t)},{label:'Deadline',get:t=>EX.fmtDate(t.deadline)},{label:'Status',get:t=>EX.pill(t.status)}].concat(EX.canDelete()?[{label:'',get:t=>EX.taskActionCell(t)}]:[]), emptyLabel:'No tasks yet'})}`;
 };
 EX.clientBillingTab = function(c){
   const invs = EX.get('invoices').filter(i=>i.clientId===c.id);
@@ -3533,7 +3542,7 @@ EX.saveWorkRequestUpdate = async function(ev, id){
 };
 /* ================= CONTENT STUDIO (global) ================= */
 /* ---- Content tracking model: committed (from the client's package) vs created vs delivered vs approved, per month ---- */
-EX.CONTENT_TYPES = ['Poster','Carousel','Reel','YouTube Video','Infographic','AI Video','Video','Photo','Blog','Story'];
+EX.CONTENT_TYPES = ['Poster','Carousel','Reel','YouTube Video','Infographic','AI Video','Video','Photo','Blog','Story','Static Design','Social Media Creative','Motion Graphics','Other'];
 EX.SERVICE_TO_CONTENT = {'Graphic Design (Posters)':'Poster','Carousels':'Carousel','Infographics':'Infographic','Reels':'Reel','Video Editing':'Video','AI Videos':'AI Video','Photography':'Photo','Videography':'Video','Blogs':'Blog','YouTube Videos':'YouTube Video'};
 EX.CLIENT_APPROVALS = ['Pending','Approved','Re-work'];
 EX.APPROVAL_TONE = {'Pending':'warn','Approved':'good','Re-work':'bad'};
@@ -3848,25 +3857,27 @@ EX.canCreateTasks = function(role){ role = role || EX.currentRole(); return !['i
 EX.views['tasks'] = function(){
   const role = EX.currentRole();
   const isManager = ['super_admin','ops_head','creative_head'].includes(role);
-  let items = EX.get('tasks');
+  let items = EX.activeTasks();
   if(!isManager) items = items.filter(t=>t.assignedTo===EX.session.employeeId);
   items = items.map(t=>Object.assign({},t,{clientName:(EX.byId('clients',t.clientId)||{}).companyName||''}));
   return `${EX.pageHead('Tasks', isManager?'All tasks across the team':'Tasks assigned to you', EX.canCreateTasks(role)?`<button onclick="EX.showAddTaskModal()" class="ex-btn ex-btn-primary">${EX.icon('plus','w-4 h-4')} New task</button>`:'')}
-  ${EX.dataTable({id:'tasksGlobal', rows:items, searchKey:t=>`${t.title} ${t.clientName}`, filterOptions:EX.TASK_STATUSES, filterKey:t=>t.status, filterLabel:'status', rowClick:t=>`EX.openTaskDrawer('${t.id}')`,
-    columns:[{label:'Task',get:t=>t.title},{label:'Client',get:t=>t.clientName||'—'},{label:'Type',get:t=>t.type||'—'},{label:'Assigned',get:t=>t.assignedToName||'—'},
+  ${EX.archiveNote()}
+  ${EX.dataTable({id:'tasksGlobal', rows:items, searchKey:t=>`${t.title} ${t.clientName} ${t.assignedToName||''}`, filterOptions:EX.TASK_STATUSES, filterKey:t=>t.status, filterLabel:'status', rowClick:t=>`EX.openTaskDrawer('${t.id}')`,
+    columns:[{label:'Task',get:t=>t.title},{label:'Client',get:t=>t.clientName||'—'},{label:'Type',get:t=>t.type||'—'},{label:'Assigned',get:t=>t.assignedToName||'—'},{label:'Content',get:t=>EX.taskContentCell(t)},
       {label:'Created by',get:t=>EX.taskCreatorLabel(t)},{label:'Priority',get:t=>t.priority?EX.pill(t.priority==='Urgent'||t.priority==='High'?'Overdue':'New'):'—'},{label:'Deadline',get:t=>EX.fmtDate(t.deadline)},{label:'Status',get:t=>EX.pill(t.status)}].concat(EX.canDelete()?[{label:'',get:t=>EX.taskActionCell(t)}]:[]),
     emptyLabel:'No tasks yet'})}`;
 };
 EX.showAddTaskModal = function(taskId, clientId){
   const t = taskId? EX.byId('tasks', taskId) : (clientId? {clientId} : null);
   const fields = EX.TASK_FIELDS.map(f=>{
-    if(f.key==='clientId') return Object.assign({},f,{options:EX.get('clients').map(c=>({value:c.id,label:c.companyName}))});
+    if(f.key==='clientId') return Object.assign({},f,{options:[{value:'',label:'— No client —'}].concat(EX.get('clients').map(c=>({value:c.id,label:c.companyName})))});
     if(f.key==='assignedTo') return Object.assign({},f,{options:EX.get('employees').filter(e=>e.status==='Active' && EX.canAssignTo(e)).map(e=>({value:e.id,label:e.name}))});
     return f;
   });
   EX.openModal(`${EX.modalHeader(taskId?'Edit task':'New task')}
-    <form onsubmit="EX.saveTask(event${taskId?`,'${taskId}'`:''})" class="p-5 max-h-[70vh] overflow-y-auto">${EX.formGrid(fields, t||{priority:'Medium'}, 2)}
+    <form onsubmit="EX.saveTask(event${taskId?`,'${taskId}'`:''})" class="p-5 max-h-[70vh] overflow-y-auto">${EX.formGrid(fields, t||{priority:'Medium'}, 2)}${EX.taskContentSection(t)}
     <div class="flex justify-end gap-2 pt-3 mt-2 border-t" style="border-color:var(--ex-line)"><button type="button" class="ex-btn ex-btn-ghost" onclick="EX.closeModal()">Cancel</button><button class="ex-btn ex-btn-primary">Save</button></div></form>`,{wide:true});
+  EX.wireTaskContentSelect();
 };
 EX.saveTask = async function(ev, taskId){
   ev.preventDefault();
@@ -3874,6 +3885,25 @@ EX.saveTask = async function(ev, taskId){
   const emp = data.assignedTo? EX.byId('employees', data.assignedTo) : null;
   if(emp && !EX.canAssignTo(emp)){ EX.toast(`You are not permitted to assign tasks to ${emp.name}.`, 'bad'); return; }
   data.assignedToName = emp? emp.name : null;
+  // ---- optional link to a content item (poster / video / reel ...) ----
+  const fd = new FormData(ev.target);
+  const linkId = fd.get('contentId') || ''; const newType = fd.get('newContentType') || '';
+  if(linkId){
+    const cx = EX.byId('content', linkId);
+    if(!cx){ EX.toast('That content item no longer exists.','bad'); return; }
+    if(data.clientId && cx.clientId!==data.clientId){ EX.toast('That content belongs to a different client. Pick the same client, or clear the content link.','bad'); return; }
+    if(!data.clientId) data.clientId = cx.clientId;
+    data.contentId = linkId;
+  } else if(newType){
+    if(!data.clientId){ EX.toast('Pick a client first — a new content item has to belong to a client.','bad'); return; }
+    const cdata = {title:data.title, type:newType, clientId:data.clientId, assignedTo:data.assignedTo||'', deadline:data.deadline||null,
+      forMonth: data.deadline? EX.monthKey(new Date(data.deadline)) : (EX.ui.contentMonth||EX.monthKey()), status:'Draft', comments:[], clientApproval:'Pending'};
+    const cid = await EX.add('content', cdata);
+    await EX.addAudit('Created content item (from task)','content',cid,null,cdata);
+    data.contentId = cid;
+  } else {
+    data.contentId = null;
+  }
   if(taskId){ await EX.patch('tasks', taskId, data); }
   else { data.status='To Do'; data.revisionCount=0; const id = await EX.add('tasks', data);
     if(data.assignedTo) await EX.addNotification({targetEmployeeId:data.assignedTo, message:`New task assigned: ${data.title}`, link:'tasks'});
@@ -3887,6 +3917,7 @@ EX.openTaskDrawer = function(id){
     <div class="p-5">
       <div class="flex items-center gap-2 mb-3">${EX.pill(t.status)}${t.priority?EX.pill(t.priority):''}<span class="text-xs" style="color:var(--ex-ink-soft)">Deadline ${EX.fmtDate(t.deadline)}</span></div>
       <div class="text-xs mb-3" style="color:var(--ex-ink-soft)">Created by <b>${EX.taskCreatorLabel(t)}</b>${t._createdAt?' on '+EX.fmtDate(t._createdAt):''}${t.assignedToName?' · Assigned to <b>'+t.assignedToName+'</b>':''}</div>
+      ${EX.taskArchiveNote(t)}${EX.taskLinkedContentBlock(t)}
       <div class="flex flex-wrap gap-1.5 mb-4">${EX.TASK_STATUSES.map(s=>`<button onclick="EX.setTaskStatus('${id}','${s}')" class="ex-btn ex-btn-sm ${t.status===s?'ex-btn-primary':'ex-btn-ghost'}">${s}</button>`).join('')}</div>
       <div class="grid grid-cols-2 gap-3 mb-3">
         <div><label class="ex-label">Estimated hours</label><input value="${t.estimatedHours||''}" disabled class="ex-input"/></div>
@@ -4535,6 +4566,7 @@ EX.EMP_FIELDS = [
   {key:'email', label:'Email', type:'email', required:true},
   {key:'phone', label:'Phone'},
   {key:'role', label:'Role', type:'select', options:Object.keys(EX.ROLES).map(r=>({value:r,label:EX.ROLES[r].label}))},
+  {key:'vaultAccess', label:'Client credentials access', type:'select', options:['No','Yes'], hint:'Super Admin, MD, Operations Head and Digital Marketing Executives always have access. Choose Yes to let this person open client credentials too.'},
   {key:'department', label:'Department'},
   {key:'employmentType', label:'Employment type', type:'select', options:['Full-time','Part-time','Intern','Outsourced','Contract']},
   {key:'joiningDate', label:'Joining date', type:'date'},
@@ -4607,7 +4639,8 @@ EX.showEmpModal = function(id){
   const emp = id? EX.byId('employees', id) : null;
   if(!EX.canManageMembers() && !id){ EX.toast('Only the Super Admin can add members.','bad'); return; }
   const fields = EX.EMP_FIELDS.map(f=> f.key==='managerId'? Object.assign({},f,{options:EX.get('employees').filter(e=>e.id!==id).map(e=>({value:e.id,label:e.name}))})
-    : (f.key==='role' && !EX.canManageMembers())? Object.assign({},f,{disabled:true, hint:'Only the Super Admin can change roles.'}) : f);
+    : (f.key==='role' && !EX.canManageMembers())? Object.assign({},f,{disabled:true, hint:'Only the Super Admin can change roles.'})
+    : (f.key==='vaultAccess' && !EX.canManageMembers())? Object.assign({},f,{disabled:true, hint:'Only the Super Admin can change who can open client credentials.'}) : f);
   EX.openModal(`${EX.modalHeader(id?'Edit employee':'Add employee / intern', 'Interns, part-timers and outsourced editors use the same form — set Employment Type accordingly.')}
     <form onsubmit="EX.saveEmployee(event${id?`,'${id}'`:''})" class="p-5 max-h-[70vh] overflow-y-auto">${EX.formGrid(fields, emp||{status:'Active',employmentType:'Full-time'}, 2)}
     <div class="flex justify-end gap-2 pt-3 mt-2 border-t" style="border-color:var(--ex-line)"><button type="button" class="ex-btn ex-btn-ghost" onclick="EX.closeModal()">Cancel</button><button class="ex-btn ex-btn-primary">Save</button></div></form>`,{wide:true});
@@ -4621,7 +4654,7 @@ EX.saveEmployee = async function(ev, id){
     const clash = EX.get('employees').find(e=>e.id!==id && (e.email||'').trim().toLowerCase()===data.email.toLowerCase());
     if(clash){ EX.toast(`${clash.name} already uses ${data.email}. Each person must have a unique email.`,'bad'); return; }
   }
-  if(id && !EX.canManageMembers()){ const ex0 = EX.byId('employees', id); if(ex0) data.role = ex0.role; }   // others may update profile details, never roles
+  if(id && !EX.canManageMembers()){ const ex0 = EX.byId('employees', id); if(ex0){ data.role = ex0.role; data.vaultAccess = ex0.vaultAccess || 'No'; } }   // others may update profile details, never roles or credential access
   // Only a Super Admin / MD may hand out (or change) Super Admin-level roles — Ops Head-level roles cannot promote anyone to it.
   if(EX.currentRole()!=='super_admin'){
     const existing = id? EX.byId('employees', id) : null;
@@ -4733,7 +4766,7 @@ EX.downloadMonthlyReviewPdf = async function(ym, empId){
     const wfh = EX.approvedDaySet(e.id,'wfhRequests',ym), lv = EX.approvedDaySet(e.id,'leaveRequests',ym);
     const all = Array.from(new Set(days.concat(Array.from(wfh), Array.from(lv)))).sort();
     doc.table([{label:'Date',w:1.6},{label:'Status',w:1.4},{label:'Check-in',w:1.2},{label:'Check-out',w:1.2},{label:'Hours',w:0.8,align:'right'},{label:'EOD',w:1}],
-      all.map(d=>{ const r = EX.attDay(e.id,d); return [EX.fmtDate(new Date(d+'T00:00:00').getTime()), EX.dayStatus(e.id,d), EX.timeOnly(r.checkIn), EX.timeOnly(r.checkOut), r.hours||'-', r.eod&&r.eod.summary?'Yes':'-']; }), {empty:'No attendance recorded this month'});
+      all.map(d=>{ const r = EX.attDay(e.id,d); return [EX.fmtDate(new Date(d+'T00:00:00').getTime()), EX.dayStatus(e.id,d), EX.timeOnly(r.checkIn), EX.timeOnly(r.checkOut), r.hours||'-', EX.eodDone(e.id,d)?'Yes':'-']; }), {empty:'No attendance recorded this month'});
     const tasks = EX.get('tasks').filter(t=>t.assignedTo===e.id && t._createdAt && EX.monthKey(new Date(t._createdAt))===ym);
     doc.heading('Tasks this month');
     doc.table([{label:'Task',w:3.2},{label:'Client',w:2},{label:'Deadline',w:1.3},{label:'Status',w:1.2}], tasks.map(t=>[t.title,(EX.byId('clients',t.clientId)||{}).companyName||'-',EX.fmtDate(t.deadline),t.status]), {empty:'No tasks assigned this month'});
@@ -5111,7 +5144,7 @@ EX.views['attendance'] = function(){
       <div class="text-xs mt-1" style="color:var(--ex-ink-soft)">${myAtt.checkIn?('Checked in at '+EX.timeOnly(myAtt.checkIn)+(EX.isLate(myAtt)?' (late)':'')):'Not checked in yet'} ${myAtt.checkOut?(' · Checked out at '+EX.timeOnly(myAtt.checkOut)):''}</div>
       <div class="text-[11px] mt-1" style="color:var(--ex-ink-soft)">One check-in and one check-out per day.</div></div>
       <div class="flex gap-2">${!myAtt.checkIn?`<button id="btnClockIn" onclick="this.disabled=true;EX.clockIn('${me.id}')" class="ex-btn ex-btn-primary">${EX.icon('clock','w-4 h-4')} Check in</button>`:!myAtt.checkOut?`<button id="btnClockOut" onclick="this.disabled=true;EX.clockOut('${me.id}')" class="ex-btn ex-btn-ghost">${EX.icon('clock','w-4 h-4')} Check out</button>`:`<span class="ex-pill ex-pill-good">Day complete — ${myAtt.hours||0}h</span>`}
-      <a href="#/eod" class="ex-btn ex-btn-ghost">${EX.icon('file-text','w-4 h-4')} ${myAtt.eod&&myAtt.eod.summary?'View EOD report':'Submit EOD report'}</a></div>
+      <a href="#/eod" class="ex-btn ex-btn-ghost">${EX.icon('file-text','w-4 h-4')} ${EX.eodDone(me.id,today)?'View EOD report':'Open today\'s EOD report'}</a></div>
     </div>
     <div class="grid grid-cols-2 md:grid-cols-5 gap-3 mt-4 pt-4 border-t" style="border-color:var(--ex-line)">
       <div><div class="ex-label">Days present</div><b class="tnum">${st.daysPresent}</b></div><div><div class="ex-label">WFH days</div><b class="tnum">${st.wfhDays}</b></div><div><div class="ex-label">Leave days</div><b class="tnum">${st.leaveDays}</b></div><div><div class="ex-label">Late days</div><b class="tnum">${st.lateDays}</b></div><div><div class="ex-label">Hours (this month)</div><b class="tnum">${st.hoursWorked}h</b></div>
@@ -5123,7 +5156,7 @@ EX.views['attendance'] = function(){
   return `${EX.pageHead('Attendance', day===today?'Team attendance for today.':'Team attendance for '+EX.fmtDate(new Date(day+'T00:00:00').getTime())+'.', `<input type="date" value="${day}" max="${today}" onchange="EX.ui.attDate=this.value||EX.todayKey();EX.scheduleRender()" class="ex-input !w-auto"/>`)}${selfCard}
   <div class="ex-card overflow-x-auto">
     <table class="ex-table"><thead><tr><th>Employee</th><th>Status</th><th>Check-in</th><th>Check-out</th><th>Hours</th><th>EOD</th></tr></thead>
-    <tbody>${rows.map(({e,d,st})=>`<tr><td>${EX.esc(e.name)}</td><td>${EX.attPill(st)}</td><td>${d.checkIn?EX.timeOnly(d.checkIn):'—'}</td><td>${d.checkOut?EX.timeOnly(d.checkOut):'—'}</td><td class="tnum">${d.hours||'—'}</td><td>${d.eod&&d.eod.summary?'<span class="ex-pill ex-pill-good">Submitted</span>':'<span class="ex-pill ex-pill-neutral">—</span>'}</td>
+    <tbody>${rows.map(({e,d,st})=>`<tr><td>${EX.esc(e.name)}</td><td>${EX.attPill(st)}</td><td>${d.checkIn?EX.timeOnly(d.checkIn):'—'}</td><td>${d.checkOut?EX.timeOnly(d.checkOut):'—'}</td><td class="tnum">${d.hours||'—'}</td><td>${EX.eodDone(e.id,today)?'<span class="ex-pill ex-pill-good">Generated</span>':'<span class="ex-pill ex-pill-neutral">—</span>'}</td>
     </tr>`).join('')}</tbody></table>
   </div>
   <div class="mt-3 flex flex-wrap gap-4"><a href="#/employees/review" class="text-xs underline" style="color:var(--ex-blue-600)">Open Monthly Review Dashboard →</a><a href="#/eod" class="text-xs underline" style="color:var(--ex-blue-600)">Daily EOD reports →</a></div>
@@ -5132,6 +5165,359 @@ EX.views['attendance'] = function(){
 
 /* ================= DAILY EOD REPORT ================= */
 EX.EOD_MANAGERS = ['super_admin','ops_head','creative_head','hr'];
+
+/* ================= TASK ARCHIVE, TEAM TASK SEARCH, TASK HISTORY ================= */
+// Completed tasks stay in the active lists for 7 days, then move to Task History automatically.
+// Nothing is deleted: "archived" is worked out from the completion date, so the full history stays
+// available for search and for every report.
+EX.ARCHIVE_AFTER_DAYS = 7;
+EX.taskDoneAt = (t)=> t.completedAt || t._updatedAt || t._createdAt || 0;
+EX.isTaskArchived = (t)=> t.status==='Done' && (EX.now() - EX.taskDoneAt(t)) > EX.ARCHIVE_AFTER_DAYS*86400000;
+EX.activeTasks = ()=> EX.get('tasks').filter(t=>!EX.isTaskArchived(t));
+EX.dayKeyOf = (ts)=> EX.todayKey(new Date(ts));
+EX.taskOverdue = (t, day)=> !!(t.deadline && t.status!=='Done' && EX.utcDayKey(t.deadline) < (day||EX.todayKey()));
+EX.taskArchiveNote = function(t){
+  if(t.status!=='Done') return '';
+  const doneAt = EX.taskDoneAt(t);
+  return EX.isTaskArchived(t)
+    ? `<div class="text-xs mb-3" style="color:var(--ex-ink-soft)">Completed ${EX.fmtDate(doneAt)} · moved to Task History (archived, never deleted).</div>`
+    : `<div class="text-xs mb-3" style="color:var(--ex-ink-soft)">Completed ${EX.fmtDate(doneAt)} · moves to Task History on ${EX.fmtDate(doneAt + EX.ARCHIVE_AFTER_DAYS*86400000)}.</div>`;
+};
+EX.canSeeAllTaskHistory = ()=> EX.EOD_MANAGERS.includes(EX.currentRole());
+EX.archiveNote = function(){
+  const all = EX.canSeeAllTaskHistory(); const me = EX.session.employeeId;
+  const n = EX.get('tasks').filter(t=>EX.isTaskArchived(t) && (all || t.assignedTo===me)).length;
+  return n? `<div class="text-xs mb-2" style="color:var(--ex-ink-soft)">${n} completed task${n===1?'':'s'} older than ${EX.ARCHIVE_AFTER_DAYS} days ${n===1?'is':'are'} kept in <a href="#/taskhistory" class="underline" style="color:var(--ex-blue-600)">Task History</a> (search by date).</div>` : '';
+};
+
+/* ---- Team Tasks: find an employee and see everything assigned to them (Super Admin / MD and Creative Head only) ---- */
+EX.TASK_MONITOR_ROLES = ['super_admin','creative_head'];
+EX.canMonitorTasks = ()=> EX.TASK_MONITOR_ROLES.includes(EX.currentRole());
+EX.tm = EX.tm || {q:'', status:'', client:'', archived:false, open:{}};
+EX.tmGroupOf = function(t){
+  if(t.status==='Done') return 'done';
+  if(t.status==='In Progress' || t.status==='Revision') return 'ongoing';
+  if(t.status==='Review' || t.status==='Blocked') return 'hold';
+  return 'pending';
+};
+EX.tmRows = function(){
+  const st = EX.tm; const q = (st.q||'').trim().toLowerCase();
+  let emps = EX.get('employees').filter(e=>e.status!=='Removed');
+  if(q) emps = emps.filter(e=> (e.name||'').toLowerCase().includes(q) || ((EX.ROLES[e.role]||{}).label||'').toLowerCase().includes(q));
+  const pool = EX.get('tasks').filter(t=> (st.archived || !EX.isTaskArchived(t)) && (!st.client || t.clientId===st.client));
+  const rows = emps.map(e=>{
+    const mine = pool.filter(t=>t.assignedTo===e.id);
+    const c = {assigned:mine.length, pending:0, ongoing:0, hold:0, done:0, overdue:0};
+    mine.forEach(t=>{ c[EX.tmGroupOf(t)]++; if(EX.taskOverdue(t)) c.overdue++; });
+    const shown = !st.status ? mine : (st.status==='overdue' ? mine.filter(t=>EX.taskOverdue(t)) : mine.filter(t=>EX.tmGroupOf(t)===st.status));
+    shown.sort((a,b)=> (a.status==='Done')-(b.status==='Done') || (a.deadline||9e15)-(b.deadline||9e15));
+    return {e, c, shown};
+  });
+  rows.sort((a,b)=> (b.c.assigned-b.c.done)-(a.c.assigned-a.c.done) || (a.e.name||'').localeCompare(b.e.name||''));
+  return {rows, unassigned: pool.filter(t=>!t.assignedTo && t.status!=='Done').length};
+};
+EX.tmResultsHtml = function(){
+  const {rows, unassigned} = EX.tmRows(); const st = EX.tm;
+  const sum = rows.reduce((s,r)=>{ ['assigned','pending','ongoing','hold','done','overdue'].forEach(k=>s[k]+=r.c[k]); return s; }, {assigned:0,pending:0,ongoing:0,hold:0,done:0,overdue:0});
+  const tile = (l,v,tone)=> `<div class="ex-card p-3"><div class="text-[11px]" style="color:var(--ex-ink-soft)">${l}</div><div class="font-display font-bold text-xl tnum" ${tone?`style="color:var(--ex-${tone})"`:''}>${v}</div></div>`;
+  const chip = (l,v,tone)=> `<span class="text-xs px-2 py-1 rounded-lg" style="background:var(--ex-blue-50);${tone&&v?`color:var(--ex-${tone});`:''}"><b class="tnum">${v}</b> ${l}</span>`;
+  const cards = rows.map(({e,c,shown})=>{
+    const open = st.open[e.id]===undefined ? !!(st.q||'').trim() : !!st.open[e.id];
+    const pct = c.assigned? Math.round(c.done/c.assigned*100) : 0;
+    const table = open? (shown.length? `<div class="overflow-x-auto border-t" style="border-color:var(--ex-line)"><table class="ex-table"><thead><tr><th>Task</th><th>Client</th><th>Status</th><th>Priority</th><th>Deadline</th><th>Linked content</th></tr></thead><tbody>
+      ${shown.map(t=>`<tr style="cursor:pointer" onclick="EX.openTaskDrawer('${t.id}')"><td>${EX.esc(t.title)}</td><td>${EX.esc((EX.byId('clients',t.clientId)||{}).companyName||'—')}</td><td>${EX.pill(t.status)}${EX.isTaskArchived(t)?' <span class="ex-pill ex-pill-neutral">Archived</span>':''}</td><td>${EX.esc(t.priority||'—')}</td><td ${EX.taskOverdue(t)?'style="color:var(--ex-bad);font-weight:600"':''}>${EX.fmtDate(t.deadline)}${EX.taskOverdue(t)?' · overdue':''}</td><td>${EX.taskContentCell(t)}</td></tr>`).join('')}
+      </tbody></table></div>` : `<div class="p-4 text-xs border-t" style="border-color:var(--ex-line);color:var(--ex-ink-soft)">No tasks match these filters.</div>`) : '';
+    return `<div class="ex-card mb-3 overflow-hidden" data-tm-emp="${e.id}">
+      <button type="button" class="w-full text-left p-4 flex flex-wrap items-center gap-3" onclick="EX.tmToggle('${e.id}')">
+        ${EX.avatar(e.name,36)}
+        <div class="min-w-[160px]"><div class="font-semibold text-sm">${EX.esc(e.name)}</div><div class="text-xs" style="color:var(--ex-ink-soft)">${EX.esc((EX.ROLES[e.role]||{}).label||e.role||'')}</div></div>
+        <div class="flex flex-wrap gap-1.5 flex-1">${chip('assigned',c.assigned)}${chip('pending',c.pending)}${chip('ongoing',c.ongoing)}${chip('on hold / review',c.hold)}${chip('completed',c.done)}${chip('overdue',c.overdue,'bad')}</div>
+        <div class="w-28"><div class="h-1.5 rounded-full" style="background:var(--ex-line)"><div class="h-1.5 rounded-full" style="width:${pct}%;background:var(--ex-good)"></div></div><div class="text-[10px] mt-0.5 text-right" style="color:var(--ex-ink-soft)">${pct}% done</div></div>
+      </button>${table}</div>`;
+  }).join('');
+  return `<div class="grid grid-cols-2 md:grid-cols-6 gap-3 mb-4">${tile('Assigned',sum.assigned)}${tile('Pending',sum.pending)}${tile('Ongoing',sum.ongoing)}${tile('On hold / review',sum.hold)}${tile('Completed',sum.done,'good')}${tile('Overdue',sum.overdue,'bad')}</div>
+    ${unassigned?`<div class="text-xs mb-2" style="color:var(--ex-ink-soft)">${unassigned} open task${unassigned===1?' has':'s have'} no one assigned yet.</div>`:''}
+    ${cards || EX.empty('No employee matches that name')}`;
+};
+EX.tmRefresh = function(){ const el = document.getElementById('tmResults'); if(el) el.innerHTML = EX.tmResultsHtml(); };
+EX.tmSet = function(k, v){ EX.tm[k] = v; EX.tmRefresh(); };
+EX.tmToggle = function(id){
+  const cur = EX.tm.open[id]===undefined ? !!(EX.tm.q||'').trim() : EX.tm.open[id];
+  EX.tm.open[id] = !cur; EX.tmRefresh();
+};
+EX.views['taskmonitor'] = function(){
+  if(!EX.canMonitorTasks()) return EX.empty('Team Tasks is available to the Super Admin / MD and the Creative Head only.');
+  const st = EX.tm;
+  const clients = EX.get('clients').slice().sort((a,b)=>(a.companyName||'').localeCompare(b.companyName||''));
+  return `${EX.pageHead('Team Tasks', 'Search a team member to see what is assigned to them, what is in progress, pending and completed.')}
+  <div class="ex-card p-3 mb-4 flex flex-wrap items-center gap-2">
+    <div class="relative flex-1 min-w-[220px]"><span class="absolute left-3 top-1/2 -translate-y-1/2" style="color:var(--ex-ink-soft)">${EX.icon('search','w-3.5 h-3.5')}</span>
+      <input id="tmQ" class="ex-input !pl-8" placeholder="Search employee by name…" value="${EX.esc(st.q)}" oninput="EX.tmSet('q',this.value)"/></div>
+    <select id="tmStatus" class="ex-select !w-auto text-xs" onchange="EX.tmSet('status',this.value)">
+      ${[['','All tasks'],['pending','Pending (To Do)'],['ongoing','Ongoing (In Progress / Revision)'],['hold','On hold / Review'],['done','Completed'],['overdue','Overdue']].map(([v,l])=>`<option value="${v}" ${st.status===v?'selected':''}>${l}</option>`).join('')}
+    </select>
+    <select id="tmClient" class="ex-select !w-auto text-xs" onchange="EX.tmSet('client',this.value)"><option value="">All clients</option>${clients.map(c=>`<option value="${c.id}" ${st.client===c.id?'selected':''}>${EX.esc(c.companyName)}</option>`).join('')}</select>
+    <label class="flex items-center gap-1.5 text-xs"><input type="checkbox" id="tmArch" ${st.archived?'checked':''} onchange="EX.tmSet('archived',this.checked)"/> Include archived (completed more than ${EX.ARCHIVE_AFTER_DAYS} days ago)</label>
+  </div>
+  <div id="tmResults">${EX.tmResultsHtml()}</div>
+  <div class="text-[11px] mt-2" style="color:var(--ex-ink-soft)">Pending = To Do · Ongoing = In Progress or Revision · On hold / review = Blocked or waiting for review · Completed tasks move to <a href="#/taskhistory" class="underline">Task History</a> after ${EX.ARCHIVE_AFTER_DAYS} days.</div>`;
+};
+
+/* ---- Task History: archived (and recent) completed tasks, searchable by date / date range ---- */
+EX.thResults = function(){
+  const ui = EX.ui; const ym = ui.thMonth || EX.monthKey();
+  const all = EX.canSeeAllTaskHistory(); const me = EX.session.employeeId;
+  let pool = EX.get('tasks').filter(t=>t.status==='Done');
+  if(!all) pool = pool.filter(t=>t.assignedTo===me);
+  else if(ui.thEmp) pool = pool.filter(t=>t.assignedTo===ui.thEmp);
+  if(ui.thClient) pool = pool.filter(t=>t.clientId===ui.thClient);
+  if(ui.thScope==='archived') pool = pool.filter(EX.isTaskArchived);
+  const dayOf = (t)=> EX.dayKeyOf(EX.taskDoneAt(t));
+  const from = ui.thFrom || '', to = ui.thTo || ui.thFrom || '';
+  const ranged = !!(ui.thFrom || ui.thTo);
+  const results = (ranged ? pool.filter(t=>{ const d = dayOf(t); return (!from || d>=from) && (!to || d<=to); }) : pool.filter(t=>dayOf(t).startsWith(ym)))
+    .sort((a,b)=> EX.taskDoneAt(b)-EX.taskDoneAt(a));
+  const perDay = {}; pool.forEach(t=>{ const d = dayOf(t); if(d.startsWith(ym)) perDay[d] = (perDay[d]||0)+1; });
+  return {ym, pool, results, perDay, from, to, ranged};
+};
+EX.thSet = function(k, v){ EX.ui[k] = v; EX.scheduleRender(); };
+EX.thShift = function(delta){ EX.ui.thMonth = EX.shiftMonth(EX.ui.thMonth || EX.monthKey(), delta); EX.scheduleRender(); };
+EX.thPick = function(day){
+  const ui = EX.ui;
+  if(!ui.thFrom || (ui.thFrom && ui.thTo)){ ui.thFrom = day; ui.thTo = ''; }
+  else if(day < ui.thFrom){ ui.thTo = ui.thFrom; ui.thFrom = day; }
+  else { ui.thTo = day; }
+  EX.scheduleRender();
+};
+EX.thClear = function(){ EX.ui.thFrom = ''; EX.ui.thTo = ''; EX.scheduleRender(); };
+EX.thExportCsv = async function(){
+  const {results} = EX.thResults();
+  const csv = EX.toCsv(results, [{label:'Task',get:t=>t.title},{label:'Client',get:t=>(EX.byId('clients',t.clientId)||{}).companyName||''},{label:'Assigned to',get:t=>t.assignedToName||''},{label:'Completed on',get:t=>EX.dayKeyOf(EX.taskDoneAt(t))},{label:'Type',get:t=>t.type||''},{label:'Priority',get:t=>t.priority||''},{label:'Deadline',get:t=>t.deadline?EX.utcDayKey(t.deadline):''},{label:'Linked content',get:t=>{ const x=t.contentId&&EX.byId('content',t.contentId); return x?x.title:''; }},{label:'Archived',get:t=>EX.isTaskArchived(t)?'Yes':'No'}]);
+  await EX.downloadFile('Task-History.csv', csv);
+};
+EX.views['taskhistory'] = function(){
+  const ui = EX.ui; const r = EX.thResults(); const all = EX.canSeeAllTaskHistory();
+  const [Y,M] = r.ym.split('-').map(Number);
+  const first = new Date(Y, M-1, 1).getDay(); const days = new Date(Y, M, 0).getDate();
+  const inSel = (k)=> r.ranged && (!r.from || k>=r.from) && (!r.to || k<=r.to);
+  let cells = ''; for(let i=0;i<first;i++) cells += '<div></div>';
+  for(let d=1; d<=days; d++){
+    const k = r.ym+'-'+String(d).padStart(2,'0'); const n = r.perDay[k]||0; const sel = inSel(k);
+    cells += `<button type="button" data-day="${k}" onclick="EX.thPick('${k}')" class="rounded-lg p-1.5 text-center border" style="border-color:${sel?'var(--ex-blue-600)':'var(--ex-line)'};background:${sel?'var(--ex-blue-100)':(n?'var(--ex-blue-50)':'transparent')}"><div class="text-xs">${d}</div><div class="text-[10px] font-semibold tnum" style="color:${n?'var(--ex-good)':'var(--ex-ink-soft)'}">${n||'·'}</div></button>`;
+  }
+  const emps = EX.get('employees').slice().sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+  const clients = EX.get('clients').slice().sort((a,b)=>(a.companyName||'').localeCompare(b.companyName||''));
+  const label = r.ranged ? (r.from===r.to||!r.to ? EX.fmtDate(new Date(r.from+'T00:00:00').getTime()) : `${r.from?EX.fmtDate(new Date(r.from+'T00:00:00').getTime()):'…'} → ${r.to?EX.fmtDate(new Date(r.to+'T00:00:00').getTime()):'…'}`) : EX.monthLabel(r.ym);
+  return `${EX.pageHead('Task History', all? 'Every completed task — recent and archived. Pick a date or a range on the calendar.' : 'Your completed tasks — recent and archived. Pick a date or a range on the calendar.',
+    `<button onclick="EX.thExportCsv()" class="ex-btn ex-btn-ghost">${EX.icon('download','w-4 h-4')} CSV</button>`)}
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-4">
+    <div class="ex-card p-4">
+      <div class="flex items-center justify-between mb-2"><button onclick="EX.thShift(-1)" class="ex-btn ex-btn-ghost ex-btn-sm">${EX.icon('chevron-left','w-3.5 h-3.5')}</button><div class="font-display font-bold text-sm">${EX.monthLabel(r.ym)}</div><button onclick="EX.thShift(1)" class="ex-btn ex-btn-ghost ex-btn-sm">${EX.icon('chevron-right','w-3.5 h-3.5')}</button></div>
+      <div class="grid grid-cols-7 gap-1 text-center text-[10px] mb-1" style="color:var(--ex-ink-soft)">${['Su','Mo','Tu','We','Th','Fr','Sa'].map(d=>`<div>${d}</div>`).join('')}</div>
+      <div class="grid grid-cols-7 gap-1" id="thCalendar">${cells}</div>
+      <div class="text-[11px] mt-2" style="color:var(--ex-ink-soft)">Numbers show tasks completed that day. Click a day, then another day to select a range.</div>
+    </div>
+    <div class="ex-card p-4 lg:col-span-2">
+      <div class="font-display font-bold text-sm mb-3">Find completed tasks</div>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div><label class="ex-label">From date</label><input type="date" id="thFrom" class="ex-input" value="${ui.thFrom||''}" onchange="EX.thSet('thFrom',this.value)"/></div>
+        <div><label class="ex-label">To date</label><input type="date" id="thTo" class="ex-input" value="${ui.thTo||''}" onchange="EX.thSet('thTo',this.value)"/></div>
+        ${all?`<div><label class="ex-label">Employee</label><select id="thEmp" class="ex-select" onchange="EX.thSet('thEmp',this.value)"><option value="">Everyone</option>${emps.map(e=>`<option value="${e.id}" ${ui.thEmp===e.id?'selected':''}>${EX.esc(e.name)}</option>`).join('')}</select></div>`:''}
+        <div><label class="ex-label">Client</label><select id="thClient" class="ex-select" onchange="EX.thSet('thClient',this.value)"><option value="">All clients</option>${clients.map(c=>`<option value="${c.id}" ${ui.thClient===c.id?'selected':''}>${EX.esc(c.companyName)}</option>`).join('')}</select></div>
+        <div><label class="ex-label">Show</label><select id="thScope" class="ex-select" onchange="EX.thSet('thScope',this.value)"><option value="all" ${ui.thScope!=='archived'?'selected':''}>All completed tasks</option><option value="archived" ${ui.thScope==='archived'?'selected':''}>Archived only (older than ${EX.ARCHIVE_AFTER_DAYS} days)</option></select></div>
+      </div>
+      <div class="flex items-center gap-2 mt-3"><button onclick="EX.thClear()" class="ex-btn ex-btn-ghost ex-btn-sm">Clear dates</button><span class="text-xs" style="color:var(--ex-ink-soft)">Showing <b>${r.results.length}</b> task${r.results.length===1?'':'s'} · ${label}</span></div>
+    </div>
+  </div>
+  <div class="ex-card overflow-hidden"><div class="overflow-x-auto"><table class="ex-table" id="thTable"><thead><tr><th>Completed</th><th>Task</th><th>Client</th><th>Assigned</th><th>Linked content</th><th>Where</th></tr></thead><tbody>
+    ${r.results.length? r.results.map(t=>`<tr style="cursor:pointer" onclick="EX.openTaskDrawer('${t.id}')"><td>${EX.fmtDate(EX.taskDoneAt(t))}</td><td>${EX.esc(t.title)}</td><td>${EX.esc((EX.byId('clients',t.clientId)||{}).companyName||'—')}</td><td>${EX.esc(t.assignedToName||'—')}</td><td>${EX.taskContentCell(t)}</td><td>${EX.isTaskArchived(t)?'<span class="ex-pill ex-pill-neutral">Archived</span>':'<span class="ex-pill ex-pill-good">Active list</span>'}</td></tr>`).join('') : `<tr><td colspan="6">${EX.empty('No completed tasks for this selection','Try another date range, or clear the filters.')}</td></tr>`}
+  </tbody></table></div></div>`;
+};
+
+/* ================= TASK <-> CONTENT LINK (optional) ================= */
+EX.TASK_CONTENT_TYPES = ['Poster','Static Design','Social Media Creative','Carousel','Reel','Video','Motion Graphics','YouTube Video','Infographic','AI Video','Photo','Other'];
+EX.taskContentOptions = function(clientId, selected){
+  let items = clientId? EX.get('content').filter(x=>x.clientId===clientId) : [];
+  if(selected && !items.some(x=>x.id===selected)){ const s = EX.byId('content', selected); if(s) items = [s].concat(items); }
+  items = items.slice().sort((a,b)=>(b._createdAt||0)-(a._createdAt||0)).slice(0,300);
+  return `<option value="">${clientId? '— No linked content —' : '— Pick a client first to see its content —'}</option>` +
+    items.map(x=>`<option value="${x.id}" ${x.id===selected?'selected':''}>${EX.esc(x.title)} · ${EX.esc(x.type||'')} · ${EX.esc(x.status||'')}</option>`).join('');
+};
+EX.taskContentSection = function(t){
+  return `<div class="mt-3 p-3 rounded-xl border" style="border-color:var(--ex-line)">
+    <div class="font-display font-bold text-sm">Linked content <span class="font-normal text-xs" style="color:var(--ex-ink-soft)">(optional)</span></div>
+    <div class="text-xs mb-2" style="color:var(--ex-ink-soft)">Connect this task to the poster, video, reel, etc. it produces. The task's status and the content's approval status are tracked separately. Leave empty for tasks with no creative deliverable.</div>
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+      <div><label class="ex-label">Existing content item</label><select id="f_contentId" name="contentId" class="ex-select">${EX.taskContentOptions(t&&t.clientId, t&&t.contentId)}</select></div>
+      <div><label class="ex-label">…or create a new content item</label><select id="f_newContentType" name="newContentType" class="ex-select"><option value="">— Don't create —</option>${EX.TASK_CONTENT_TYPES.map(x=>`<option>${x}</option>`).join('')}</select></div>
+    </div></div>`;
+};
+EX.wireTaskContentSelect = function(){
+  const form = document.querySelector('form[onsubmit*="EX.saveTask"]'); if(!form) return;
+  const cs = form.querySelector('[name=clientId]'), ct = form.querySelector('[name=contentId]');
+  if(cs && ct) cs.addEventListener('change', ()=>{ ct.innerHTML = EX.taskContentOptions(cs.value, ''); });
+};
+EX.taskContentCell = function(t){
+  if(!t.contentId) return '<span style="color:var(--ex-ink-soft)">—</span>';
+  const x = EX.byId('content', t.contentId);
+  if(!x) return '<span class="text-xs" style="color:var(--ex-ink-soft)">Content removed</span>';
+  return `<div class="text-xs"><span class="font-medium">${EX.esc(x.title)}</span> <span style="color:var(--ex-ink-soft)">· ${EX.esc(x.type||'')}</span><div class="mt-0.5">${EX.pill(x.status)} ${EX.approvalPill(EX.contentApproval(x))}</div></div>`;
+};
+EX.taskLinkedContentBlock = function(t){
+  if(!t.contentId) return '';
+  const x = EX.byId('content', t.contentId);
+  if(!x) return `<div class="rounded-xl border p-3 mb-3 text-xs" style="border-color:var(--ex-line);color:var(--ex-ink-soft)">The linked content item was removed.</div>`;
+  const c = EX.byId('clients', x.clientId);
+  return `<div class="rounded-xl border p-3 mb-3" style="border-color:var(--ex-line)" id="taskLinkedContent">
+    <div class="ex-label">Linked content</div>
+    <div class="flex flex-wrap items-center justify-between gap-2">
+      <div><div class="font-medium text-sm">${EX.esc(x.title)}</div><div class="text-xs" style="color:var(--ex-ink-soft)">${EX.esc(x.type||'')}${c?' · '+EX.esc(c.companyName):''}</div></div>
+      <div class="flex flex-wrap items-center gap-2"><span class="text-[11px]" style="color:var(--ex-ink-soft)">Content status</span>${EX.pill(x.status)}<span class="text-[11px]" style="color:var(--ex-ink-soft)">Client approval</span>${EX.approvalPill(EX.contentApproval(x))}
+        <button onclick="EX.closeModal();EX.openContentDrawer('${x.id}')" class="ex-btn ex-btn-ghost ex-btn-sm">Open content</button></div>
+    </div></div>`;
+};
+EX.contentLinkedTasksBlock = function(x){
+  const ts = EX.get('tasks').filter(t=>t.contentId===x.id);
+  if(!ts.length) return '';
+  return `<div class="ex-label">Linked tasks <span class="font-normal" style="color:var(--ex-ink-soft)">— task progress is tracked separately from approval</span></div>
+    <div class="space-y-1.5 mb-4" id="contentLinkedTasks">${ts.map(t=>`<div class="flex items-center justify-between gap-2 rounded-lg border p-2 text-sm" style="border-color:var(--ex-line);cursor:pointer" onclick="EX.closeModal();EX.openTaskDrawer('${t.id}')"><div><b>${EX.esc(t.title)}</b> <span class="text-xs" style="color:var(--ex-ink-soft)">${t.assignedToName?'· '+EX.esc(t.assignedToName):''}</span></div>${EX.pill(t.status)}</div>`).join('')}</div>`;
+};
+
+/* ================= AUTOMATED END-OF-DAY REPORTS ================= */
+// The report is built from the real task records (assigned / completed / in progress / pending / on hold /
+// incomplete) - nobody types it. At the company's EOD time (Settings, default 18:30) the first open session
+// saves a snapshot of it for every employee (managers' sessions do the whole team, anyone else does their
+// own), so the report as it stood at the end of the day is kept. Snapshots live under their own key
+// "eod_YYYY-MM-DD" on the employee's attendance document so they can never overwrite attendance data.
+EX.EOD_DEFAULT_TIME = '18:30';
+EX.eodTime = function(){ const t = (EX.data.companyConfig||{}).eodTime; return /^\d{2}:\d{2}$/.test(t||'')? t : EX.EOD_DEFAULT_TIME; };
+EX.eodItem = function(t, day){
+  const c = EX.byId('clients', t.clientId); const x = t.contentId? EX.byId('content', t.contentId) : null;
+  return {id:t.id, title:t.title||'', client:c? c.companyName : '', status:t.status, priority:t.priority||'', deadline:t.deadline||null,
+    overdue: !!(t.deadline && t.status!=='Done' && EX.utcDayKey(t.deadline) < day),
+    contentTitle: x? x.title : '', contentType: x? (x.type||'') : '', contentApproval: x? EX.contentApproval(x) : ''};
+};
+EX.eodBuild = function(empId, day){
+  const endTs = new Date(day+'T23:59:59.999').getTime();
+  const mine = EX.get('tasks').filter(t=> t.assignedTo===empId && (!t._createdAt || t._createdAt<=endTs));
+  const item = (t, extra)=> Object.assign(EX.eodItem(t, day), extra||{});
+  const completed = mine.filter(t=> t.status==='Done' && t.completedAt && EX.dayKeyOf(t.completedAt)===day).map(t=>item(t));
+  // open at the end of that day: not done yet, or finished only after that day
+  const openAt = mine.filter(t=> t.status!=='Done' || (t.completedAt && t.completedAt>endTs));
+  const incomplete = openAt.map(t=> t.status==='Done'? item(t,{status:'In Progress'}) : item(t))
+    .sort((a,b)=> (b.overdue?1:0)-(a.overdue?1:0) || (a.deadline||9e15)-(b.deadline||9e15));
+  const assigned = mine.filter(t=> (t._createdAt && EX.dayKeyOf(t._createdAt)===day) || (t.deadline && EX.utcDayKey(t.deadline)===day))
+    .map(t=> item(t,{newToday: !!(t._createdAt && EX.dayKeyOf(t._createdAt)===day), dueToday: !!(t.deadline && EX.utcDayKey(t.deadline)===day)}));
+  return {day, assigned, completed, incomplete};
+};
+EX.eodSnapshot = function(empId, day){
+  const d = EX.eodBuild(empId, day);
+  d.generatedAt = EX.now(); d.auto = true; d.reconstructed = day < EX.todayKey();
+  return d;
+};
+EX.eodGet = function(empId, day){
+  const a = EX.byId('attendance', empId); const snap = a && a['eod_'+day];
+  if(snap && snap.day===day) return Object.assign({}, snap, {stored:true});
+  const d = EX.eodBuild(empId, day); d.stored = false; d.live = day===EX.todayKey(); d.reconstructed = day < EX.todayKey();
+  return d;
+};
+EX.eodGroups = function(d){
+  const inc = d.incomplete || [];
+  return {
+    inProgress: inc.filter(i=>i.status==='In Progress' || i.status==='Revision'),
+    onHold: inc.filter(i=>i.status==='Review' || i.status==='Blocked'),
+    pending: inc.filter(i=>!['In Progress','Revision','Review','Blocked'].includes(i.status)),
+  };
+};
+EX.eodCounts = function(d){
+  const g = EX.eodGroups(d);
+  return {assigned:(d.assigned||[]).length, completed:(d.completed||[]).length, inProgress:g.inProgress.length, pending:g.pending.length, onHold:g.onHold.length, incomplete:(d.incomplete||[]).length};
+};
+// "Has a report" = an automatic snapshot exists OR the employee typed an optional note
+EX.eodDone = function(empId, day){
+  const a = EX.byId('attendance', empId); if(!a) return false;
+  if(a['eod_'+day]) return true;
+  const rec = EX.attDay(empId, day); return !!(rec.eod && (rec.eod.summary || rec.eod.blockers || rec.eod.tomorrow));
+};
+EX.eodDaysInMonth = function(empId, ym){
+  const a = EX.byId('attendance', empId); if(!a) return 0;
+  const set = new Set();
+  Object.keys(a).forEach(k=>{
+    if(k.startsWith('eod_'+ym)){ const s = a[k]; if(s && ((s.assigned||[]).length || (s.completed||[]).length || (s.incomplete||[]).length)) set.add(k.slice(4)); }
+  });
+  EX.attDayKeys(empId, ym).forEach(d=>{ const r = EX.attDay(empId, d); if(r.eod && (r.eod.summary || r.eod.blockers || r.eod.tomorrow)) set.add(d); });
+  return set.size;
+};
+EX.writeEodSnapshot = async function(empId, day, snap){
+  const key = 'eod_'+day;
+  if(EX.byId('attendance', empId)) await EX.patch('attendance', empId, {[key]: snap});
+  else await EX.setId('attendance', empId, {[key]: snap});
+};
+EX.SWEEP_ROLES = ['super_admin','ops_head','creative_head','hr'];
+EX._eodBusy = false;
+EX.autoEodSweep = async function(){
+  if(EX._eodBusy) return 0;
+  if(EX.session.mode!=='staff' || !EX.session.employeeId) return 0;
+  if(!(EX._loaded && EX._loaded.attendance && EX._loaded.tasks && EX._loaded.employees)) return 0;
+  const me = EX.currentEmployee(); if(!me) return 0;
+  const emps = EX.SWEEP_ROLES.includes(EX.currentRole())? EX.get('employees').filter(e=>e.status==='Active') : [me];
+  const now = new Date(); const [h,m] = EX.eodTime().split(':').map(Number);
+  const afterTime = now.getHours()*60 + now.getMinutes() >= h*60 + m;
+  const days = [];
+  for(let i=0;i<4;i++){ if(i===0 && !afterTime) continue; days.push(EX.todayKey(new Date(now.getTime() - i*86400000))); }
+  EX._eodBusy = true; let n = 0;
+  try{
+    for(const e of emps) for(const day of days){
+      if(EX.isWeeklyOff(new Date(day+'T00:00:00'))) continue;
+      const a = EX.byId('attendance', e.id);
+      if(a && a['eod_'+day]) continue;
+      const snap = EX.eodSnapshot(e.id, day);
+      if(!snap.assigned.length && !snap.completed.length && !snap.incomplete.length) continue;   // nothing to report
+      await EX.writeEodSnapshot(e.id, day, snap); n++;
+    }
+  }catch(err){ console.warn('EOD sweep stopped', err); }
+  finally{ EX._eodBusy = false; }
+  return n;
+};
+EX.eodRegenerate = async function(empId, day){
+  if(empId!==EX.session.employeeId && !EX.SWEEP_ROLES.includes(EX.currentRole())){ EX.toast('You can only refresh your own report.','bad'); return; }
+  const snap = EX.eodSnapshot(empId, day);
+  try{ await EX.writeEodSnapshot(empId, day, snap); }catch(e){ return; }
+  EX.toast('EOD report refreshed from the latest task records','good');
+};
+EX.eodTaskTable = function(title, items, opts){
+  opts = opts || {};
+  if(!items.length) return `<div class="mb-3"><div class="text-xs font-semibold mb-1">${title} <span style="color:var(--ex-ink-soft)">(0)</span></div><div class="text-xs" style="color:var(--ex-ink-soft)">${opts.none||'None'}</div></div>`;
+  return `<div class="mb-3"><div class="text-xs font-semibold mb-1">${title} <span style="color:var(--ex-ink-soft)">(${items.length})</span></div>
+    <div class="overflow-x-auto"><table class="ex-table"><thead><tr><th>Task</th><th>Client</th><th>Status</th><th>Deadline</th><th>Content</th></tr></thead><tbody>
+    ${items.map(i=>`<tr><td>${EX.esc(i.title)}${i.newToday?' <span class="ex-pill ex-pill-info">New today</span>':''}${i.dueToday?' <span class="ex-pill ex-pill-warn">Due today</span>':''}</td><td>${EX.esc(i.client||'—')}</td><td>${EX.pill(i.status)}${i.overdue?' <span class="ex-pill ex-pill-bad">Overdue</span>':''}</td><td>${i.deadline?EX.fmtDate(i.deadline):'—'}</td><td class="text-xs">${i.contentTitle?EX.esc(i.contentTitle)+' · '+EX.esc(i.contentType)+(i.contentApproval?' · '+EX.esc(i.contentApproval):''):'—'}</td></tr>`).join('')}
+    </tbody></table></div></div>`;
+};
+EX.eodReportHtml = function(empId, day){
+  const d = EX.eodGet(empId, day); const g = EX.eodGroups(d); const c = EX.eodCounts(d);
+  const rec = EX.attDay(empId, day); const note = rec.eod || {};
+  const tile = (l,v,tone)=> `<div class="ex-card p-3"><div class="text-[11px]" style="color:var(--ex-ink-soft)">${l}</div><div class="font-display font-bold text-xl tnum" ${tone?`style="color:var(--ex-${tone})"`:''}>${v}</div></div>`;
+  const banner = d.stored
+    ? `Generated automatically ${EX.fmtDateTime(d.generatedAt)} from the task records${d.reconstructed?' (rebuilt later from the task statuses at that time)':''}.`
+    : (d.live ? `Live view of today — the final report is generated automatically at ${EX.eodTime()}.` : 'No saved report for this day — rebuilt from the current task records.');
+  return `<div id="eodReport">
+    <div class="text-xs mb-3" style="color:var(--ex-ink-soft)">${rec.checkIn?`Checked in ${EX.timeOnly(rec.checkIn)}`:'No check-in recorded'}${rec.checkOut?` · Checked out ${EX.timeOnly(rec.checkOut)} · ${rec.hours||0}h`:''} · ${banner}</div>
+    <div class="grid grid-cols-2 md:grid-cols-6 gap-3 mb-4">${tile('Assigned today',c.assigned)}${tile('Completed',c.completed,'good')}${tile('In progress',c.inProgress)}${tile('Pending',c.pending)}${tile('On hold / approval',c.onHold)}${tile('Incomplete',c.incomplete,c.incomplete?'warn':'')}</div>
+    ${EX.eodTaskTable('Tasks assigned for the day', d.assigned||[], {none:'Nothing new was assigned or due on this day.'})}
+    ${EX.eodTaskTable('Tasks completed during the day', d.completed||[], {none:'No task was completed on this day.'})}
+    ${EX.eodTaskTable('In progress', g.inProgress)}
+    ${EX.eodTaskTable('Pending (not started)', g.pending)}
+    ${EX.eodTaskTable('On hold / awaiting approval', g.onHold)}
+    ${EX.eodTaskTable('All incomplete tasks and their current status', d.incomplete||[], {none:'Nothing is outstanding.'})}
+    ${(note.summary||note.blockers||note.tomorrow)? `<div class="rounded-xl border p-3 text-sm" style="border-color:var(--ex-line)"><div class="text-xs font-semibold mb-1">Employee's own notes</div>${note.summary?`<div class="mb-1">${EX.esc(note.summary)}</div>`:''}${note.blockers?`<div class="text-xs"><b>Blockers:</b> ${EX.esc(note.blockers)}</div>`:''}${note.tomorrow?`<div class="text-xs"><b>Tomorrow:</b> ${EX.esc(note.tomorrow)}</div>`:''}</div>`:''}
+  </div>`;
+};
+EX.eodViewModal = function(empId, day){
+  const e = EX.byId('employees', empId); if(!e) return;
+  EX.openModal(`${EX.modalHeader(EX.esc(e.name)+' — EOD report', EX.fmtDate(new Date(day+'T00:00:00').getTime()))}
+    <div class="p-5 max-h-[75vh] overflow-y-auto">${EX.eodReportHtml(empId, day)}
+    <div class="flex justify-end gap-2 mt-3"><button onclick="EX.eodRegenerate('${empId}','${day}')" class="ex-btn ex-btn-ghost ex-btn-sm">Refresh from latest tasks</button><button onclick="EX.downloadEodPdf('${empId}','${day}')" class="ex-btn ex-btn-primary ex-btn-sm">${EX.icon('download','w-3.5 h-3.5')} PDF</button></div></div>`, {wide:true});
+};
 EX.tasksCompletedOn = (empId, day)=> EX.get('tasks').filter(t=>t.assignedTo===empId && t.status==='Done' && t.completedAt && EX.todayKey(new Date(t.completedAt))===day);
 EX.views['eod'] = function(){
   const role = EX.currentRole();
@@ -5139,63 +5525,71 @@ EX.views['eod'] = function(){
   const isManager = EX.EOD_MANAGERS.includes(role);
   const today = EX.todayKey();
   const day = EX.ui.eodDate || today;
-  const rec = EX.attDay(me.id, day);
-  const eod = rec.eod || {};
-  const done = EX.tasksCompletedOn(me.id, day);
-  const oldest = EX.todayKey(new Date(EX.now()-6*86400000));
-  const mine = EX.attDayKeys(me.id, EX.monthKey()).concat(EX.attDayKeys(me.id, EX.shiftMonth(EX.monthKey(),-1))).filter((d,i,arr)=>arr.indexOf(d)===i && EX.attDay(me.id,d).eod).sort().reverse().slice(0,15);
-  const form = `<div class="ex-card p-5 mb-5">
+  const oldest = EX.todayKey(new Date(EX.now()-30*86400000));
+  const rec = EX.attDay(me.id, day); const note = rec.eod || {};
+  const mine = `<div class="ex-card p-5 mb-5">
     <div class="flex flex-wrap items-center justify-between gap-2 mb-3"><div class="font-display font-bold text-sm">My EOD report — ${EX.fmtDate(new Date(day+'T00:00:00').getTime())}</div>
-      <input type="date" value="${day}" min="${oldest}" max="${today}" onchange="EX.ui.eodDate=this.value||EX.todayKey();EX.scheduleRender()" class="ex-input !w-auto"/></div>
-    <div class="text-xs mb-3" style="color:var(--ex-ink-soft)">${rec.checkIn?`Checked in ${EX.timeOnly(rec.checkIn)}`:'No check-in recorded'}${rec.checkOut?` · Checked out ${EX.timeOnly(rec.checkOut)} · ${rec.hours||0}h`:''} · Tasks you completed this day: <b>${done.length}</b>${done.length?' ('+done.map(t=>EX.esc(t.title)).join(', ')+')':''}</div>
-    <form onsubmit="EX.saveEod(event,'${day}')" class="space-y-3">
-      <div><label class="ex-label">What did you work on today? *</label><textarea name="summary" rows="4" class="ex-textarea" required placeholder="Clients worked on, deliverables completed, calls / meetings…">${EX.esc(eod.summary||'')}</textarea></div>
+      <div class="flex items-center gap-2"><input type="date" id="eodDate" value="${day}" min="${oldest}" max="${today}" onchange="EX.ui.eodDate=this.value||EX.todayKey();EX.scheduleRender()" class="ex-input !w-auto"/>
+      <button onclick="EX.downloadEodPdf('${me.id}','${day}')" class="ex-btn ex-btn-ghost ex-btn-sm">${EX.icon('download','w-3.5 h-3.5')} PDF</button></div></div>
+    <div class="text-xs mb-3 rounded-lg p-2" style="background:var(--ex-blue-50)">You don't need to write this report — it is created automatically from your tasks every working day at <b>${EX.eodTime()}</b>. Keep your task statuses up to date and it stays accurate.</div>
+    ${EX.eodReportHtml(me.id, day)}
+    <form onsubmit="EX.saveEod(event,'${day}')" class="space-y-3 mt-4 pt-3 border-t" style="border-color:var(--ex-line)">
+      <div class="text-xs font-semibold">Anything to add? <span class="font-normal" style="color:var(--ex-ink-soft)">(optional — blockers or a note for your manager)</span></div>
+      <textarea name="summary" rows="2" class="ex-textarea" placeholder="Extra note about today (optional)">${EX.esc(note.summary||'')}</textarea>
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <div><label class="ex-label">Blockers / issues</label><textarea name="blockers" rows="2" class="ex-textarea" placeholder="Anything stopping you or needing help">${EX.esc(eod.blockers||'')}</textarea></div>
-        <div><label class="ex-label">Plan for tomorrow</label><textarea name="tomorrow" rows="2" class="ex-textarea">${EX.esc(eod.tomorrow||'')}</textarea></div>
+        <textarea name="blockers" rows="2" class="ex-textarea" placeholder="Blockers / issues (optional)">${EX.esc(note.blockers||'')}</textarea>
+        <textarea name="tomorrow" rows="2" class="ex-textarea" placeholder="Plan for tomorrow (optional)">${EX.esc(note.tomorrow||'')}</textarea>
       </div>
-      <div class="flex flex-wrap items-center gap-2"><button class="ex-btn ex-btn-primary">${eod.summary?'Update EOD report':'Submit EOD report'}</button>
-        ${eod.summary?`<span class="text-xs" style="color:var(--ex-ink-soft)">Submitted ${EX.fmtDateTime(eod.submittedAt)}</span><button type="button" onclick="EX.downloadEodPdf('${me.id}','${day}')" class="ex-btn ex-btn-ghost ex-btn-sm">${EX.icon('download','w-3.5 h-3.5')} Download PDF</button>`:''}</div>
+      <button class="ex-btn ex-btn-ghost">Save note</button>
     </form></div>`;
-  const past = `<div class="ex-card p-4 mb-5"><div class="font-semibold text-sm mb-2">My recent EOD reports</div>${mine.length? mine.map(d=>`<div class="flex items-center justify-between py-1.5 border-b text-sm" style="border-color:var(--ex-line-soft)"><div>${EX.fmtDate(new Date(d+'T00:00:00').getTime())} <span class="text-xs" style="color:var(--ex-ink-soft)">${EX.esc((EX.attDay(me.id,d).eod.summary||'').slice(0,80))}</span></div><button onclick="EX.downloadEodPdf('${me.id}','${d}')" class="ex-btn ex-btn-ghost ex-btn-sm">${EX.icon('download','w-3.5 h-3.5')} PDF</button></div>`).join('') : '<div class="text-xs" style="color:var(--ex-ink-soft)">No reports submitted yet.</div>'}</div>`;
   let team = '';
   if(isManager){
     const tday = EX.ui.eodTeamDate || today;
     const emps = EX.get('employees').filter(e=>e.status==='Active');
-    const rows = emps.map(e=>({e, r:EX.attDay(e.id,tday)}));
-    const sub = rows.filter(x=>x.r.eod && x.r.eod.summary).length;
+    const rows = emps.map(e=>{ const d = EX.eodGet(e.id, tday); return {e, d, c:EX.eodCounts(d)}; });
+    const generated = rows.filter(r=>r.d.stored).length;
+    const sum = (k)=> rows.reduce((s,r)=>s+r.c[k],0);
     team = `<div class="ex-card overflow-hidden"><div class="flex flex-wrap items-center justify-between gap-2 p-3 border-b" style="border-color:var(--ex-line)">
-        <div class="font-display font-bold text-sm">Team EOD — ${sub} of ${emps.length} submitted</div>
-        <div class="flex items-center gap-2"><input type="date" value="${tday}" max="${today}" onchange="EX.ui.eodTeamDate=this.value||EX.todayKey();EX.scheduleRender()" class="ex-input !w-auto"/>
+        <div class="font-display font-bold text-sm">Team EOD — ${generated} of ${emps.length} generated · ${sum('completed')} completed · ${sum('incomplete')} incomplete</div>
+        <div class="flex items-center gap-2"><input type="date" id="eodTeamDate" value="${tday}" max="${today}" onchange="EX.ui.eodTeamDate=this.value||EX.todayKey();EX.scheduleRender()" class="ex-input !w-auto"/>
         <button onclick="EX.downloadTeamEodPdf('${tday}')" class="ex-btn ex-btn-primary ex-btn-sm">${EX.icon('download','w-3.5 h-3.5')} Download team EOD (PDF)</button></div></div>
-      <div class="overflow-x-auto"><table class="ex-table"><thead><tr><th>Employee</th><th>Attendance</th><th>EOD</th><th>Summary</th><th></th></tr></thead><tbody>
-      ${rows.map(({e,r})=>`<tr><td>${EX.esc(e.name)}</td><td>${EX.attPill(EX.dayStatus(e.id,tday))}</td><td>${r.eod&&r.eod.summary?'<span class="ex-pill ex-pill-good">Submitted</span>':'<span class="ex-pill ex-pill-warn">Missing</span>'}</td><td class="text-xs" style="max-width:360px">${EX.esc(((r.eod||{}).summary||'').slice(0,140))}</td><td>${r.eod&&r.eod.summary?`<button onclick="EX.downloadEodPdf('${e.id}','${tday}')" class="ex-btn ex-btn-ghost ex-btn-sm">${EX.icon('download','w-3.5 h-3.5')}</button>`:''}</td></tr>`).join('')}
+      <div class="overflow-x-auto"><table class="ex-table" id="teamEodTable"><thead><tr><th>Employee</th><th>Attendance</th><th>Assigned</th><th>Completed</th><th>In progress</th><th>Pending</th><th>On hold</th><th>Incomplete</th><th>Report</th><th></th></tr></thead><tbody>
+      ${rows.map(({e,d,c})=>`<tr data-emp="${e.id}"><td>${EX.esc(e.name)}</td><td>${EX.attPill(EX.dayStatus(e.id,tday))}</td><td class="tnum">${c.assigned}</td><td class="tnum">${c.completed}</td><td class="tnum">${c.inProgress}</td><td class="tnum">${c.pending}</td><td class="tnum">${c.onHold}</td><td class="tnum">${c.incomplete}</td><td>${d.stored?'<span class="ex-pill ex-pill-good">Auto-generated</span>':((c.assigned+c.completed+c.incomplete)? '<span class="ex-pill ex-pill-info">'+(d.live?'Live':'Rebuilt')+'</span>':'<span class="ex-pill ex-pill-neutral">No tasks</span>')}</td><td><button onclick="EX.eodViewModal('${e.id}','${tday}')" class="ex-btn ex-btn-ghost ex-btn-sm">View</button></td></tr>`).join('')}
       </tbody></table></div></div>`;
   }
-  return `${EX.pageHead('Daily EOD Report', 'End-of-day summary of what you worked on — downloadable as PDF.')}${form}${past}${team}`;
+  return `${EX.pageHead('Daily EOD Report', 'Generated automatically from task assignments and completion — no manual entry needed.')}${mine}${team}`;
 };
 EX.saveEod = async function(ev, day){
   ev.preventDefault();
   const me = EX.currentEmployee(); if(!me) return;
   const f = new FormData(ev.target);
-  const summary = (f.get('summary')||'').trim();
-  if(!summary){ EX.toast('Please write what you worked on.','bad'); return; }
-  const done = EX.tasksCompletedOn(me.id, day).map(t=>({title:t.title, client:(EX.byId('clients',t.clientId)||{}).companyName||''}));
+  const summary = (f.get('summary')||'').trim(), blockers = (f.get('blockers')||'').trim(), tomorrow = (f.get('tomorrow')||'').trim();
   try{
-    await EX.writeAttDay(me.id, day, (rec)=>{ rec.eod = {summary, blockers:(f.get('blockers')||'').trim(), tomorrow:(f.get('tomorrow')||'').trim(), tasksDone:done, submittedAt:EX.now()}; });
+    await EX.writeAttDay(me.id, day, (rec)=>{ rec.eod = Object.assign({}, rec.eod||{}, {summary, blockers, tomorrow, submittedAt:EX.now()}); });
   }catch(e){ return; }
-  EX.toast('EOD report saved','good');
+  EX.toast('Note saved','good');
 };
 EX.eodBlock = function(doc, emp, day){
-  const rec = EX.attDay(emp.id, day); const eod = rec.eod || {};
+  const d = EX.eodGet(emp.id, day); const g = EX.eodGroups(d); const c = EX.eodCounts(d);
+  const rec = EX.attDay(emp.id, day); const note = rec.eod || {};
   doc.heading(`${emp.name}  -  ${(EX.ROLES[emp.role]||{}).label||emp.role}`);
   doc.paragraph(`${EX.dayStatus(emp.id, day)}  |  In: ${EX.timeOnly(rec.checkIn)}  |  Out: ${EX.timeOnly(rec.checkOut)}  |  Hours: ${rec.hours||'-'}`, {size:8.5, color:[90,102,122]});
-  if(!eod.summary){ doc.paragraph('No EOD report submitted for this day.', {size:9, color:[220,38,38]}); return; }
-  doc.paragraph('Work completed', {size:9, bold:true, after:1}); doc.paragraph(eod.summary, {size:9.5, indent:6});
-  const tasks = eod.tasksDone||[];
-  if(tasks.length){ doc.paragraph('Tasks completed', {size:9, bold:true, after:1}); tasks.forEach(t=> doc.paragraph('- '+t.title+(t.client?'  ('+t.client+')':''), {size:9, indent:6, after:0})); doc.spacer(4); }
-  if(eod.blockers){ doc.paragraph('Blockers / issues', {size:9, bold:true, after:1}); doc.paragraph(eod.blockers, {size:9.5, indent:6}); }
-  if(eod.tomorrow){ doc.paragraph('Plan for tomorrow', {size:9, bold:true, after:1}); doc.paragraph(eod.tomorrow, {size:9.5, indent:6}); }
+  doc.paragraph(`Assigned ${c.assigned}  |  Completed ${c.completed}  |  In progress ${c.inProgress}  |  Pending ${c.pending}  |  On hold / approval ${c.onHold}  |  Incomplete ${c.incomplete}`, {size:9, bold:true});
+  const list = (title, items)=>{
+    doc.paragraph(`${title} (${items.length})`, {size:9, bold:true, after:1});
+    if(!items.length){ doc.paragraph('None', {size:9, indent:6, color:[90,102,122]}); return; }
+    items.forEach(i=> doc.paragraph('- '+i.title+(i.client?'  ('+i.client+')':'')+'  ['+i.status+(i.overdue?', overdue':'')+']'+(i.contentTitle?'  content: '+i.contentTitle:''), {size:9, indent:6, after:0}));
+    doc.spacer(4);
+  };
+  list('Tasks assigned for the day', d.assigned||[]);
+  list('Tasks completed', d.completed||[]);
+  list('In progress', g.inProgress);
+  list('Pending', g.pending);
+  list('On hold / awaiting approval', g.onHold);
+  list('All incomplete tasks - current status', d.incomplete||[]);
+  if(note.summary){ doc.paragraph('Employee note', {size:9, bold:true, after:1}); doc.paragraph(note.summary, {size:9.5, indent:6}); }
+  if(note.blockers){ doc.paragraph('Blockers / issues', {size:9, bold:true, after:1}); doc.paragraph(note.blockers, {size:9.5, indent:6}); }
+  if(note.tomorrow){ doc.paragraph('Plan for tomorrow', {size:9, bold:true, after:1}); doc.paragraph(note.tomorrow, {size:9.5, indent:6}); }
 };
 EX.downloadEodPdf = async function(empId, day){
   const emp = EX.byId('employees', empId); if(!emp) return;
@@ -5206,14 +5600,138 @@ EX.downloadEodPdf = async function(empId, day){
 EX.downloadTeamEodPdf = async function(day){
   day = day || EX.todayKey();
   const emps = EX.get('employees').filter(e=>e.status==='Active');
-  const done = emps.filter(e=>{ const r=EX.attDay(e.id,day); return r.eod && r.eod.summary; });
+  const rows = emps.map(e=>({e, d:EX.eodGet(e.id, day)})).map(r=>Object.assign(r,{c:EX.eodCounts(r.d)}));
+  const active = rows.filter(r=>r.c.assigned+r.c.completed+r.c.incomplete>0);
+  const tot = (k)=> rows.reduce((s,r)=>s+r.c[k],0);
   const doc = EX.pdfNew('Team EOD Report', EX.fmtDate(new Date(day+'T00:00:00').getTime()));
-  doc.stats([{label:'Team members',value:String(emps.length)},{label:'EOD submitted',value:String(done.length),color:[14,159,110]},{label:'Missing',value:String(emps.length-done.length),color:emps.length-done.length?[220,38,38]:[14,26,43]}],3);
-  done.forEach(e=>EX.eodBlock(doc, e, day));
-  const missing = emps.filter(e=>!done.includes(e));
-  if(missing.length){ doc.heading('EOD not submitted'); doc.table([{label:'Employee',w:3},{label:'Role',w:3},{label:'Attendance',w:2}], missing.map(e=>[e.name,(EX.ROLES[e.role]||{}).label||e.role,EX.dayStatus(e.id,day)])); }
+  doc.stats([{label:'Team members',value:String(emps.length)},{label:'With tasks',value:String(active.length)},{label:'Completed',value:String(tot('completed')),color:[14,159,110]},{label:'Incomplete',value:String(tot('incomplete')),color:tot('incomplete')?[220,38,38]:[14,26,43]}],4);
+  doc.table([{label:'Employee',w:3},{label:'Assigned',w:1,align:'right'},{label:'Done',w:1,align:'right'},{label:'In prog.',w:1,align:'right'},{label:'Pending',w:1,align:'right'},{label:'On hold',w:1,align:'right'},{label:'Incompl.',w:1,align:'right'}],
+    rows.map(r=>[r.e.name, r.c.assigned, r.c.completed, r.c.inProgress, r.c.pending, r.c.onHold, r.c.incomplete]));
+  active.forEach(r=>EX.eodBlock(doc, r.e, day));
   await EX.saveDoc(doc, `Team-EOD-${day}.pdf`);
 };
+
+/* ================= CLIENT CREDENTIALS VAULT ================= */
+// Passwords are encrypted and decrypted ONLY by the server function api/vault.js (key lives in a Vercel environment
+// variable, never in the database or this page). This page only ever holds a password in memory while someone has
+// clicked "Show" - it hides itself again after 30 seconds and when you sign out.
+EX.VAULT_ROLES = ['super_admin','md','ops_head','dme'];
+EX.canUseVault = function(){
+  const e = EX.currentEmployee();
+  return !!e && EX.session.mode==='staff' && e.status!=='Removed' && (EX.VAULT_ROLES.includes(e.role) || e.vaultAccess==='Yes');
+};
+EX.canSeeVaultLog = ()=> ['super_admin','md'].includes(EX.rawRole());
+EX.VAULT_PLATFORMS = ['Meta Business Suite','Meta Ads Manager','Instagram','Facebook','Google Ads','Google Business Profile','Website admin / CMS','Domain & hosting','LinkedIn','YouTube','Twitter / X','WhatsApp Business','Other'];
+EX.vaultReset = function(){ EX._vault = {status:null, loading:false, shown:{}, timers:{}}; };
+EX.vaultReset();
+EX.vaultCall = async function(payload){
+  if(!EX.sb) throw new Error('Not connected to the workspace database.');
+  const { data } = await EX.sb.auth.getSession();
+  const token = data && data.session && data.session.access_token;
+  if(!token) throw new Error('Your session looks expired — sign out and back in, then try again.');
+  const res = await fetch('/api/vault', {method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+token}, body: JSON.stringify(payload)});
+  const json = await res.json().catch(()=>({}));
+  if(!res.ok || json.error) throw new Error(json.error || (res.status===404 ? 'The credentials service (api/vault.js) has not been uploaded yet.' : 'Request failed ('+res.status+')'));
+  return json;
+};
+EX.vaultLoadStatus = async function(){
+  const v = EX._vault; if(v.loading || v.status) return;
+  v.loading = true;
+  try{ const s = await EX.vaultCall({action:'status'}); v.status = {configured:!!s.configured, allowed:!!s.allowed}; }
+  catch(e){ v.status = {error: e.message || 'Could not reach the credentials service.'}; }
+  v.loading = false; EX.scheduleRender();
+};
+EX.vaultRefreshData = async function(){
+  try{ if(EX._reload && EX._reload.config) await EX._reload.config(); if(EX._reload && EX._reload.auditLog) await EX._reload.auditLog(); }catch(e){}
+  EX.scheduleRender();
+};
+EX.vaultEntries = (cid)=> { const d = EX.byId('config','vault_'+cid); return (d && d.entries) || []; };
+EX.clientCredentialsTab = function(c){
+  const noAccess = `<div class="ex-card p-5 text-sm" id="vaultNoAccess">${EX.icon('lock','w-4 h-4 inline mr-1')} You don't have access to client credentials. Only the Super Admin, MD, Operations Head and Digital Marketing Executives can open this section — ask the Super Admin if you need access.</div>`;
+  if(EX._vault.owner !== EX.session.employeeId){ EX.vaultReset(); EX._vault.owner = EX.session.employeeId; }   // never carry revealed passwords over to another user
+  if(!EX.canUseVault()) return noAccess;
+  const st = EX._vault.status;
+  if(!st){ EX.vaultLoadStatus(); return `<div class="ex-card p-5 text-sm" style="color:var(--ex-ink-soft)">Checking the credentials vault…</div>`; }
+  if(st.error) return `<div class="ex-card p-5 text-sm" id="vaultError"><div class="font-semibold mb-1">The credentials vault is not reachable</div><div class="mb-3" style="color:var(--ex-ink-soft)">${EX.esc(st.error)}</div><button class="ex-btn ex-btn-ghost ex-btn-sm" onclick="EX._vault.status=null;EX.scheduleRender()">Try again</button></div>`;
+  if(!st.allowed) return noAccess;
+  if(!st.configured) return `<div class="ex-card p-5 text-sm" id="vaultNotConfigured"><div class="font-semibold mb-1">One-time setup needed</div><div style="color:var(--ex-ink-soft)">Credentials are stored encrypted, so the vault needs a private encryption key. In Vercel open <b>Settings → Environment Variables</b>, add <b>VAULT_ENCRYPTION_KEY</b> with a long private phrase (20+ characters), then redeploy. Keep a copy of that phrase somewhere safe — without it saved credentials cannot be opened again.</div></div>`;
+  const entries = EX.vaultEntries(c.id).slice().sort((a,b)=>(a.platform||'').localeCompare(b.platform||''));
+  const shown = EX._vault.shown;
+  const MASK = '••••••••••';
+  const field = (label, entryId, key, value)=> `<div class="flex items-center gap-2"><div class="w-20 text-[11px]" style="color:var(--ex-ink-soft)">${label}</div><div class="flex-1 min-w-0 text-sm font-mono truncate" data-vault-field="${key}">${value!==undefined? EX.esc(value||'—') : MASK}</div><button class="ex-btn ex-btn-ghost ex-btn-sm !py-0.5" onclick="EX.vaultCopy('${c.id}','${entryId}','${key}')">Copy</button></div>`;
+  return `<div class="ex-card p-5" id="vaultTab">
+    <div class="flex flex-wrap items-center justify-between gap-2 mb-1"><div class="font-display font-bold text-sm">${EX.icon('lock','w-4 h-4 inline mr-1')} Client credentials</div><button onclick="EX.vaultEditModal('${c.id}')" class="ex-btn ex-btn-primary ex-btn-sm">${EX.icon('plus','w-3.5 h-3.5')} Add credential</button></div>
+    <div class="text-xs mb-3" style="color:var(--ex-ink-soft)">Usernames and passwords are encrypted and hidden by default. Every time one is viewed, added, changed or deleted it is recorded in the access log.</div>
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">
+    ${entries.length? entries.map(e=>{ const s = shown[e.id]; return `<div class="rounded-xl border p-3" style="border-color:var(--ex-line)" data-vault-entry="${e.id}">
+      <div class="flex items-start justify-between gap-2 mb-2"><div class="min-w-0"><div class="font-medium text-sm">${EX.esc(e.platform)}</div>${e.url?`<a href="${EX.esc(/^https?:\/\//i.test(e.url)?e.url:'https://'+e.url)}" target="_blank" rel="noopener" class="text-xs truncate block" style="color:var(--ex-blue-600)">${EX.esc(e.url)}</a>`:''}</div>
+        <div class="flex gap-1">${s?`<button class="ex-btn ex-btn-ghost ex-btn-sm" onclick="EX.vaultHide('${e.id}')">Hide</button>`:`<button class="ex-btn ex-btn-ghost ex-btn-sm" onclick="EX.vaultShow('${c.id}','${e.id}')">Show</button>`}<button class="ex-btn ex-btn-ghost ex-btn-sm" onclick="EX.vaultEditModal('${c.id}','${e.id}')">Edit</button><button class="ex-btn ex-btn-ghost ex-btn-sm" style="color:var(--ex-bad)" onclick="EX.vaultRemove('${c.id}','${e.id}')">Delete</button></div></div>
+      <div class="space-y-1">${field('Username', e.id, 'username', s? s.username : undefined)}${field('Password', e.id, 'password', s? s.password : undefined)}${s&&s.notes?`<div class="flex gap-2"><div class="w-20 text-[11px]" style="color:var(--ex-ink-soft)">Notes</div><div class="flex-1 text-sm whitespace-pre-wrap" data-vault-field="notes">${EX.esc(s.notes)}</div></div>`:''}</div>
+      <div class="text-[11px] mt-2" style="color:var(--ex-ink-soft)">Updated ${EX.fmtDate(e.updatedAt)}${e.updatedByName?' by '+EX.esc(e.updatedByName):''}${s?' · hides itself in 30 seconds':''}</div></div>`; }).join('') : `<div class="lg:col-span-2">${EX.empty('No credentials stored for this client yet','Use "Add credential" for Meta, Google, website, hosting, LinkedIn and other logins.')}</div>`}
+    </div>
+    ${EX.canSeeVaultLog()? EX.vaultLogHtml(c) : ''}
+  </div>`;
+};
+EX.vaultLogHtml = function(c){
+  const log = EX.get('auditLog').filter(l=>l.entity==='vault' && l.entityId===c.id).sort((a,b)=>(b._createdAt||0)-(a._createdAt||0)).slice(0,30);
+  return `<div class="mt-5 pt-4 border-t" style="border-color:var(--ex-line)" id="vaultLog"><div class="font-display font-bold text-sm mb-2">Access log <span class="font-normal text-xs" style="color:var(--ex-ink-soft)">— who viewed or changed credentials (Super Admin only)</span></div>
+    ${log.length? `<div class="overflow-x-auto"><table class="ex-table"><thead><tr><th>When</th><th>Who</th><th>Action</th><th>Platform</th></tr></thead><tbody>${log.map(l=>`<tr><td>${EX.fmtDateTime(l._createdAt)}</td><td>${EX.esc(l.byName||'')}</td><td>${EX.esc(l.action||'')}</td><td>${EX.esc((l.newVal&&l.newVal.platform)||'')}</td></tr>`).join('')}</tbody></table></div>` : '<div class="text-xs" style="color:var(--ex-ink-soft)">Nothing recorded yet.</div>'}</div>`;
+};
+EX.vaultShow = async function(cid, eid){
+  try{
+    const r = await EX.vaultCall({action:'reveal', clientId:cid, entryId:eid});
+    const v = EX._vault; v.shown[eid] = {username:r.entry.username, password:r.entry.password, notes:r.entry.notes};
+    clearTimeout(v.timers[eid]); v.timers[eid] = setTimeout(()=>{ delete v.shown[eid]; EX.scheduleRender(); }, 30000);
+    EX.vaultRefreshData();
+  }catch(e){ EX.toast(e.message || 'Could not open that credential.', 'bad'); }
+};
+EX.vaultHide = function(eid){ const v = EX._vault; clearTimeout(v.timers[eid]); delete v.shown[eid]; EX.scheduleRender(); };
+EX.vaultCopy = async function(cid, eid, key){
+  try{
+    let s = EX._vault.shown[eid];
+    if(!s){ const r = await EX.vaultCall({action:'reveal', clientId:cid, entryId:eid}); s = r.entry; EX.vaultRefreshData(); }
+    await navigator.clipboard.writeText(s[key] || '');
+    EX.toast((key==='password'?'Password':'Username')+' copied','good');
+  }catch(e){ EX.toast((e && e.message) || 'Could not copy.', 'bad'); }
+};
+EX.vaultEditModal = async function(cid, eid){
+  let e = {platform:'', url:'', username:'', password:'', notes:''};
+  if(eid){
+    try{ const r = await EX.vaultCall({action:'reveal', clientId:cid, entryId:eid}); e = r.entry; EX.vaultRefreshData(); }
+    catch(err){ EX.toast(err.message || 'Could not open that credential.', 'bad'); return; }
+  }
+  EX.openModal(`${EX.modalHeader(eid?'Edit credential':'Add credential', 'Stored encrypted. This action is recorded in the access log.')}
+    <form id="vaultForm" onsubmit="EX.vaultSave(event,'${cid}'${eid?`,'${eid}'`:''})" class="p-5 space-y-3" autocomplete="off">
+      <div><label class="ex-label">Platform *</label><input name="platform" list="vaultPlatforms" class="ex-input" required value="${EX.esc(e.platform)}" placeholder="e.g. Meta Business Suite"/><datalist id="vaultPlatforms">${EX.VAULT_PLATFORMS.map(p=>`<option value="${p}">`).join('')}</datalist></div>
+      <div><label class="ex-label">Login page / URL</label><input name="url" class="ex-input" value="${EX.esc(e.url)}" placeholder="https://…"/></div>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3"><div><label class="ex-label">Username / email</label><input name="username" class="ex-input" value="${EX.esc(e.username)}" autocomplete="off"/></div>
+      <div><label class="ex-label">Password</label><input name="password" type="password" class="ex-input" value="${EX.esc(e.password)}" autocomplete="new-password"/></div></div>
+      <div><label class="ex-label">Notes (2-step verification, recovery email, who owns it…)</label><textarea name="notes" rows="3" class="ex-textarea">${EX.esc(e.notes)}</textarea></div>
+      <div class="flex justify-end gap-2"><button type="button" class="ex-btn ex-btn-ghost" onclick="EX.closeModal()">Cancel</button><button class="ex-btn ex-btn-primary">Save securely</button></div>
+    </form>`);
+};
+EX.vaultSave = async function(ev, cid, eid){
+  ev.preventDefault();
+  const f = new FormData(ev.target);
+  const btn = ev.target.querySelector('button.ex-btn-primary'); if(btn){ btn.disabled = true; btn.textContent = 'Saving…'; }
+  try{
+    await EX.vaultCall({action:'save', clientId:cid, entry:{id:eid||undefined, platform:f.get('platform'), url:f.get('url'), username:f.get('username'), password:f.get('password'), notes:f.get('notes')}});
+    if(eid){ clearTimeout(EX._vault.timers[eid]); delete EX._vault.shown[eid]; }
+    EX.closeModal(); EX.toast('Credential saved (encrypted)','good');
+    EX.vaultRefreshData();
+  }catch(e){ EX.toast(e.message || 'Could not save.', 'bad'); if(btn){ btn.disabled = false; btn.textContent = 'Save securely'; } }
+};
+EX.vaultRemove = function(cid, eid){
+  const e = EX.vaultEntries(cid).find(x=>x.id===eid); if(!e) return;
+  EX.confirmAction('Delete this credential?', `<b>${EX.esc(e.platform)}</b> will be permanently removed from this client's vault. This is recorded in the access log.`, async ()=>{
+    try{ await EX.vaultCall({action:'remove', clientId:cid, entryId:eid}); EX.toast('Credential deleted','good'); EX.vaultRefreshData(); }
+    catch(err){ EX.toast(err.message || 'Could not delete.', 'bad'); }
+  }, true);
+};
+
+/* ---- background scheduler for the automatic EOD snapshot ---- */
+setInterval(()=>{ try{ EX.autoEodSweep(); }catch(e){} }, 60000);
+setTimeout(()=>{ try{ EX.autoEodSweep(); }catch(e){} }, 6000);
 
 /* ================= LEAVE & WFH ================= */
 EX.views['leave'] = function(){
@@ -5447,7 +5965,7 @@ EX.views['settings'] = function(){
     <div class="ex-card p-5">
       <div class="font-display font-bold text-sm mb-3">General</div>
       <form onsubmit="EX.saveGeneralSettings(event)">
-        ${EX.formGrid([{key:'name',label:'Company name'},{key:'baseCurrency',label:'Base currency',type:'select',options:Object.keys(EX.CURRENCIES)},{key:'taxLabel',label:'Tax label (e.g. GST, VAT)'},{key:'taxRate',label:'Default tax rate %',type:'number'},{key:'assumedCostRatio',label:'Assumed cost ratio for profitability estimates (0-1)',type:'number',step:'0.05'},{key:'officeStart',label:'Office start time (late check-in after +15 min)',type:'time'}], Object.assign({assumedCostRatio:0.6,officeStart:'10:00'},cfg), 2)}
+        ${EX.formGrid([{key:'name',label:'Company name'},{key:'baseCurrency',label:'Base currency',type:'select',options:Object.keys(EX.CURRENCIES)},{key:'taxLabel',label:'Tax label (e.g. GST, VAT)'},{key:'taxRate',label:'Default tax rate %',type:'number'},{key:'assumedCostRatio',label:'Assumed cost ratio for profitability estimates (0-1)',type:'number',step:'0.05'},{key:'officeStart',label:'Office start time (late check-in after +15 min)',type:'time'},{key:'eodTime',label:'Automatic EOD report time',type:'time',hint:'Each working day at this time the EOD reports are generated from the task records.'}], Object.assign({assumedCostRatio:0.6,officeStart:'10:00',eodTime:'18:30'},cfg), 2)}
         <button class="ex-btn ex-btn-primary mt-3">Save</button>
       </form>
     </div>
@@ -5529,8 +6047,9 @@ EX.performRestore = async function(collections){
 };
 EX.saveGeneralSettings = async function(ev){
   ev.preventDefault();
-  const data = EX.readForm(ev.target,[{key:'name'},{key:'baseCurrency'},{key:'taxLabel'},{key:'taxRate',type:'number'},{key:'assumedCostRatio',type:'number'},{key:'officeStart'}]);
+  const data = EX.readForm(ev.target,[{key:'name'},{key:'baseCurrency'},{key:'taxLabel'},{key:'taxRate',type:'number'},{key:'assumedCostRatio',type:'number'},{key:'officeStart'},{key:'eodTime'}]);
   if(!/^\d{2}:\d{2}$/.test(data.officeStart||'')) delete data.officeStart;
+  if(!/^\d{2}:\d{2}$/.test(data.eodTime||'')) delete data.eodTime;
   await EX.setConfig(data); EX.toast('Settings saved','good');
 };
 EX.saveBankSettings = async function(ev){
