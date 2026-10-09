@@ -353,6 +353,11 @@ EX.COLLECTIONS = ['config','employees','leads','proposals','clients','content','
 EX.watchCollection = function(name){
   try{
     EX.CAP.db.collection(name).onSnapshot((snap)=>{
+      const sig = snap.docs.map(d=>{ const x = d.data(); return d.id+':'+(x._updatedAt||'')+':'+(x._createdAt||''); }).join('|');
+      EX._sig = EX._sig || {};
+      const localIds = (EX.data[name]||[]).map(d=>d.id).join('|'), serverIds = snap.docs.map(d=>d.id).join('|');
+      if(EX._sig[name]===sig && EX.data[name] && localIds===serverIds){ (EX._loaded = EX._loaded || {})[name] = true; return; }   // nothing changed on the server
+      EX._sig[name] = sig;
       EX.data[name] = snap.docs.map(d=> Object.assign({id:d.id}, d.data()));
       (EX._loaded = EX._loaded || {})[name] = true;
       EX.dbReady = true;
@@ -574,7 +579,7 @@ EX.afterWrite = async function(col, op, id, payload){
   try{
     const list = EX.data[col];
     if(Array.isArray(list)){
-      if(op==='add') list.push(Object.assign({id}, payload));
+      if(op==='add'){ const ex = list.find(d=>d.id===id); if(ex) Object.assign(ex, payload); else list.push(Object.assign({id}, payload)); }
       else if(op==='patch'){ const it = list.find(d=>d.id===id); if(it) Object.assign(it, payload); }
       else if(op==='set'){ const i = list.findIndex(d=>d.id===id); if(i>=0) list[i] = Object.assign({id}, payload); else list.push(Object.assign({id}, payload)); }
       else if(op==='remove'){ const i = list.findIndex(d=>d.id===id); if(i>=0) list.splice(i,1); }
@@ -3831,17 +3836,22 @@ EX.TASK_FIELDS = [
 // digital-marketing interns) can only be assigned tasks by the Creative Head or
 // Ops Head/MD. Every other target has no extra restriction.
 EX.canAssignTo = function(targetEmp){
-  if(!targetEmp) return true;
-  const role = EX.currentRole();
-  if(['super_admin','ops_head','creative_head'].includes(role)) return true;
-  if(targetEmp.role==='dme' || EX.isDmIntern(targetEmp)){
-    return role==='dme';
-  }
-  if(EX.isCreativeTeamMember(targetEmp)){
-    return role==='creative_head';
-  }
+  // Everyone who is allowed to create tasks (EX.canCreateTasks - everyone except Interns and Part-timers) may assign a task
+  // to ANY active team member. (An older rule hid DME / creative-team people from the list depending on who was creating the task.)
   return true;
 };
+// People who can be picked in the "Assigned to" list: every employee who is not removed, one profile per email address
+// (oldest first, so a leftover duplicate profile can never be picked by mistake).
+EX.assignableEmployees = function(keepId){
+  const seen = new Set();
+  const list = EX.get('employees').filter(e=>e.status!=='Removed').slice().sort((a,b)=>(a._createdAt||0)-(b._createdAt||0)).filter(e=>{
+    const k = (e.email||'').trim().toLowerCase(); if(!k || e.id===keepId) return true;
+    if(seen.has(k)) return false; seen.add(k); return true;
+  }).filter(e=>EX.canAssignTo(e));
+  if(keepId && !list.some(e=>e.id===keepId)){ const k = EX.byId('employees', keepId); if(k) list.push(k); }
+  return list.sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+};
+EX.assigneeOptions = (keepId)=> [{value:'',label:'— Unassigned —'}].concat(EX.assignableEmployees(keepId).map(e=>({value:e.id,label:`${e.name} — ${(EX.ROLES[e.role]||{}).label||e.role||''}`})));
 EX.taskCreatorLabel = (t)=> t._createdByName || t.createdByName || '—';
 EX.taskActionCell = (t)=> EX.canDelete()? `<button title="Delete task" onclick="event.stopPropagation();EX.deleteTask('${t.id}')" class="ex-btn ex-btn-ghost ex-btn-sm !p-1.5" style="color:var(--ex-bad)">${EX.icon('trash','w-4 h-4')}</button>` : '';
 EX.deleteTask = function(id){
@@ -3871,13 +3881,13 @@ EX.showAddTaskModal = function(taskId, clientId){
   const t = taskId? EX.byId('tasks', taskId) : (clientId? {clientId} : null);
   const fields = EX.TASK_FIELDS.map(f=>{
     if(f.key==='clientId') return Object.assign({},f,{options:[{value:'',label:'— No client —'}].concat(EX.get('clients').map(c=>({value:c.id,label:c.companyName})))});
-    if(f.key==='assignedTo') return Object.assign({},f,{options:EX.get('employees').filter(e=>e.status==='Active' && EX.canAssignTo(e)).map(e=>({value:e.id,label:e.name}))});
+    if(f.key==='assignedTo') return Object.assign({},f,{options:EX.assigneeOptions(t&&t.assignedTo)});
     return f;
   });
   EX.openModal(`${EX.modalHeader(taskId?'Edit task':'New task')}
     <form onsubmit="EX.saveTask(event${taskId?`,'${taskId}'`:''})" class="p-5 max-h-[70vh] overflow-y-auto">${EX.formGrid(fields, t||{priority:'Medium'}, 2)}${EX.taskContentSection(t)}
     <div class="flex justify-end gap-2 pt-3 mt-2 border-t" style="border-color:var(--ex-line)"><button type="button" class="ex-btn ex-btn-ghost" onclick="EX.closeModal()">Cancel</button><button class="ex-btn ex-btn-primary">Save</button></div></form>`,{wide:true});
-  EX.wireTaskContentSelect();
+  EX.wireTaskContentSelect(); EX.refreshAssignees();
 };
 EX.saveTask = async function(ev, taskId){
   ev.preventDefault();
@@ -4616,11 +4626,11 @@ EX.duplicateBanner = function(){
 EX.duplicatesModal = function(){
   if(!EX.canManageMembers()){ EX.toast('Only the Super Admin can clean up duplicates.','bad'); return; }
   const groups = EX.duplicateGroups();
-  EX.openModal(`${EX.modalHeader('Duplicate profiles', 'The oldest profile is kept. A duplicate can be removed only when no work, attendance or other records are linked to it.')}
+  EX.openModal(`${EX.modalHeader('Duplicate profiles', 'The oldest profile is kept. A duplicate with no records is removed; one that already has tasks, attendance or other records is MERGED — all of its records move to the kept profile first, so nothing is lost.')}
     <div class="p-5 max-h-[65vh] overflow-y-auto space-y-4">${groups.length? groups.map(g=>`<div class="ex-card p-3"><div class="text-xs mb-2" style="color:var(--ex-ink-soft)">${EX.esc(g[0].email||'')}</div>
       ${g.map((e,i)=>{ const refs = EX.empRefCount(e.id); const isMe = e.id===EX.session.employeeId;
         return `<div class="flex items-center justify-between gap-2 py-1.5 ${i?'border-t':''}" style="border-color:var(--ex-line-soft)"><div class="text-sm"><b>${EX.esc(e.name)}</b> · ${EX.esc((EX.ROLES[e.role]||{}).label||e.role)} · created ${EX.fmtDate(e._createdAt)} ${i===0?'<span class="ex-pill ex-pill-good">Keep (oldest)</span>':''}${isMe?' <span class="ex-pill ex-pill-info">You</span>':''}<div class="text-[11px]" style="color:var(--ex-ink-soft)">${refs} linked record${refs===1?'':'s'}</div></div>
-        ${i===0?'':(isMe? '<span class="text-xs" style="color:var(--ex-ink-soft)">Signed in as this one</span>' : (refs? '<span class="text-xs" style="color:var(--ex-warn)">Has linked records — change its email in Edit instead</span>' : `<button onclick="EX.removeDuplicateProfile('${e.id}')" class="ex-btn ex-btn-danger ex-btn-sm">Remove duplicate</button>`))}</div>`; }).join('')}</div>`).join('') : '<div class="text-sm" style="color:var(--ex-good)">No duplicates left.</div>'}</div>
+        ${i===0?'':(isMe? '<span class="text-xs" style="color:var(--ex-ink-soft)">Signed in as this one</span>' : (refs? `<button onclick="EX.mergeDuplicateProfile('${e.id}')" class="ex-btn ex-btn-primary ex-btn-sm">Merge into kept profile</button>` : `<button onclick="EX.removeDuplicateProfile('${e.id}')" class="ex-btn ex-btn-danger ex-btn-sm">Remove duplicate</button>`))}</div>`; }).join('')}</div>`).join('') : '<div class="text-sm" style="color:var(--ex-good)">No duplicates left.</div>'}</div>
     <div class="flex justify-end p-4 border-t" style="border-color:var(--ex-line)"><button class="ex-btn ex-btn-ghost" onclick="EX.closeModal()">Close</button></div>`, {wide:true});
 };
 EX.removeDuplicateProfile = async function(id){
@@ -4633,6 +4643,43 @@ EX.removeDuplicateProfile = async function(id){
   try{ await EX.remove('employees', id); }catch(err){ return; }
   await EX.addAudit('Removed duplicate employee profile','employees',id,{name:e.name,email:e.email,role:e.role},{keptId:grp[0].id});
   EX.toast('Duplicate removed','good');
+  if(EX.duplicateGroups().length) EX.duplicatesModal(); else EX.closeModal();
+};
+// Moves everything linked to a duplicate profile onto the kept (oldest) profile, then removes the duplicate.
+EX.mergeDuplicateProfile = async function(id){
+  if(!EX.canManageMembers()){ EX.toast('Only the Super Admin can clean up duplicates.','bad'); return; }
+  const dup = EX.byId('employees', id); if(!dup) return;
+  const grp = EX.duplicateGroups().find(g=>g.some(x=>x.id===id));
+  if(!grp || grp[0].id===id){ EX.toast('That profile is the one being kept.','bad'); return; }
+  if(id===EX.session.employeeId){ EX.toast('You are signed in as this profile.','bad'); return; }
+  const keep = grp[0]; let moved = 0;
+  try{
+    for(const col of EX.COLLECTIONS){
+      if(['employees','attendance','auditLog','config'].includes(col)) continue;
+      for(const d of EX.get(col)){
+        const patch = {};
+        Object.keys(d).forEach(k=>{ if(k!=='id' && k.charAt(0)!=='_' && d[k]===id) patch[k] = keep.id; });
+        if(patch.assignedTo===keep.id && d.assignedToName!==undefined) patch.assignedToName = keep.name;
+        if(Object.keys(patch).length){ await EX.patch(col, d.id, patch); moved++; }
+      }
+    }
+    for(const e of EX.get('employees')){ if(e.id!==id && e.managerId===id){ await EX.patch('employees', e.id, {managerId: keep.id}); moved++; } }
+    // attendance (one document per employee, one key per day)
+    const aDup = EX.byId('attendance', id);
+    if(aDup){
+      const aKeep = EX.byId('attendance', keep.id) || {};
+      const add = {};
+      Object.keys(aDup).forEach(k=>{ if(k!=='id' && k.charAt(0)!=='_' && aKeep[k]===undefined) add[k] = aDup[k]; });
+      if(Object.keys(add).length){ if(EX.byId('attendance', keep.id)) await EX.patch('attendance', keep.id, add); else await EX.setId('attendance', keep.id, add); moved += Object.keys(add).length; }
+      await EX.remove('attendance', id);
+    }
+    // escalations / achievements stored on the profile itself
+    const recs = {}; Object.keys(dup).forEach(k=>{ if(k.indexOf('rec_')===0 && dup[k] && !keep[k]) recs[k] = dup[k]; });
+    if(Object.keys(recs).length){ await EX.patch('employees', keep.id, recs); moved += Object.keys(recs).length; }
+    await EX.remove('employees', id);
+  }catch(err){ EX.toast('Merge stopped part-way — nothing is lost; open the cleanup tool and run it again.','bad'); return; }
+  await EX.addAudit('Merged duplicate employee profile','employees',id,{name:dup.name,email:dup.email,role:dup.role},{keptId:keep.id,recordsMoved:moved});
+  EX.toast(`Merged — ${moved} record${moved===1?'':'s'} moved to ${keep.name}'s profile`,'good');
   if(EX.duplicateGroups().length) EX.duplicatesModal(); else EX.closeModal();
 };
 EX.showEmpModal = function(id){
@@ -5352,6 +5399,14 @@ EX.taskContentSection = function(t){
       <div><label class="ex-label">…or create a new content item</label><select id="f_newContentType" name="newContentType" class="ex-select"><option value="">— Don't create —</option>${EX.TASK_CONTENT_TYPES.map(x=>`<option>${x}</option>`).join('')}</select></div>
     </div></div>`;
 };
+EX.refreshAssignees = async function(){
+  // Pick up people added a moment ago by someone else (the list a browser holds can be a little behind).
+  try{ if(EX._reload && EX._reload.employees) await EX._reload.employees(); }catch(e){}
+  const sel = document.querySelector('form[onsubmit*="EX.saveTask"] [name=assignedTo]'); if(!sel) return;
+  const cur = sel.value;
+  sel.innerHTML = EX.assigneeOptions(cur).map(o=>`<option value="${EX.esc(o.value)}" ${o.value===cur?'selected':''}>${EX.esc(o.label)}</option>`).join('');
+  sel.value = cur;
+};
 EX.wireTaskContentSelect = function(){
   const form = document.querySelector('form[onsubmit*="EX.saveTask"]'); if(!form) return;
   const cs = form.querySelector('[name=clientId]'), ct = form.querySelector('[name=contentId]');
@@ -5728,6 +5783,17 @@ EX.vaultRemove = function(cid, eid){
     catch(err){ EX.toast(err.message || 'Could not delete.', 'bad'); }
   }, true);
 };
+
+/* ---- keep every screen current: the browser re-reads the live collections every 30 s, and everything on focus ---- */
+EX.POLL_FAST = ['tasks','content','employees','notifications','clients','attendance'];
+EX.pollNow = function(cols){
+  if(!EX._reload) return;
+  (cols || Object.keys(EX._reload)).forEach(c=>{ try{ if(EX._reload[c]) EX._reload[c](); }catch(e){} });
+};
+setInterval(()=>{ if(!document.hidden && EX.session.mode) EX.pollNow(EX.POLL_FAST); }, 30000);
+setInterval(()=>{ if(!document.hidden && EX.session.mode) EX.pollNow(); }, 120000);
+document.addEventListener('visibilitychange', ()=>{ if(!document.hidden && EX.session.mode) EX.pollNow(); });
+window.addEventListener('focus', ()=>{ if(EX.session.mode) EX.pollNow(); });
 
 /* ---- background scheduler for the automatic EOD snapshot ---- */
 setInterval(()=>{ try{ EX.autoEodSweep(); }catch(e){} }, 60000);
