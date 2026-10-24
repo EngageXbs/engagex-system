@@ -200,7 +200,7 @@ EX.NAV = [
    {key:'shoots', label:'Video Shoots', icon:'video', roles:['super_admin','ops_head','creative_head','videographer','video_editor']},
    {key:'tasks', label:'Tasks', icon:'check-square', roles:'*'},
    {key:'taskmonitor', label:'Team Tasks', icon:'users', roles:['super_admin','creative_head']},
-   {key:'taskhistory', label:'Task History', icon:'calendar', roles:'*'},
+   {key:'taskhistory', label:'Completed Tasks', icon:'calendar', roles:'*'},
    {key:'workreport', label:'Work Report', icon:'bar-chart', roles:'*'},
    {key:'workload', label:'Team Workload', icon:'layers', roles:['super_admin','ops_head','hr','sales_exec','creative_head']},
    {key:'support', label:'Support Desk', icon:'life-buoy', roles:['super_admin','ops_head','accounts','dme']},
@@ -449,6 +449,11 @@ EX.makeSupabaseDb = function(sb){
         async set(payload){
           const { error } = await sb.from(table).upsert({ id, data: payload });
           if(error) throw EX.mapSupabaseError(error);
+        },
+        async get(){
+          const { data, error } = await sb.from(table).select('data').eq('id', id).maybeSingle();
+          if(error) throw EX.mapSupabaseError(error);
+          return { exists: !!data, data: () => data && data.data };
         },
         async update(payload){
           const { data: existing, error: selErr } = await sb.from(table).select('data').eq('id', id).maybeSingle();
@@ -1441,8 +1446,8 @@ EX.empty = (label, sub)=> `<div class="text-center py-14 px-6"><div class="w-11 
 
 EX.pageHead = function(title, sub, actionsHtml){
   return `<div class="flex flex-wrap items-start justify-between gap-3 mb-5">
-    <div><h1 class="font-display text-xl font-bold">${title}</h1>${sub?`<p class="text-sm mt-0.5" style="color:var(--ex-ink-soft)">${sub}</p>`:''}</div>
-    <div class="flex items-center gap-2">${actionsHtml||''}</div>
+    <div class="min-w-0"><h1 class="font-display text-xl font-bold">${title}</h1>${sub?`<p class="text-sm mt-0.5" style="color:var(--ex-ink-soft)">${sub}</p>`:''}</div>
+    <div class="flex flex-wrap items-center gap-2">${actionsHtml||''}</div>
   </div>`;
 };
 
@@ -1513,7 +1518,7 @@ EX.formField = function(f, value){
       return `<option value="${ov}" ${String(ov)===String(v)?'selected':''}>${ol}</option>`;
     }).join('')}</select>`;
   } else if(f.type==='textarea'){
-    input = `<textarea id="${id}" name="${f.key}" class="ex-textarea" rows="${f.rows||3}" placeholder="${f.placeholder||''}" ${req}>${v}</textarea>`;
+    input = `<textarea id="${id}" name="${f.key}" class="ex-textarea" rows="${f.rows||3}" placeholder="${f.placeholder||''}" ${req}>${EX.esc(v)}</textarea>`;
   } else if(f.type==='checkbox'){
     return `<label class="flex items-center gap-2 text-sm py-1"><input type="checkbox" id="${id}" name="${f.key}" ${v?'checked':''} class="w-4 h-4"/> ${f.label}</label>`;
   } else if(f.type==='date'){
@@ -1573,7 +1578,7 @@ EX.sidebar = function(){
     if(!items.length) return '';
     return `<div class="mb-4">
       <div class="px-3 text-[10.5px] font-semibold uppercase tracking-wider mb-1.5" style="color:var(--ex-ink-soft);opacity:.7">${g.group}</div>
-      ${items.map(it=>`<a href="#/${it.key}" class="ex-nav-link ${EX.route_.key===it.key?'active':''}">${EX.icon(it.icon,'w-4 h-4')}<span>${it.label}</span></a>`).join('')}
+      ${items.map(it=>`<a href="#/${it.key}" class="ex-nav-link ${EX.route_.key===it.key?'active':''}">${EX.icon(it.icon,'w-4 h-4')}<span class="flex-1">${it.label}</span>${it.key==='notifications'&&EX.unreadCount()?`<span data-nav-unread class="ml-auto min-w-[18px] h-[18px] px-1 rounded-full text-[10px] flex items-center justify-center text-white" style="background:var(--ex-bad)">${EX.unreadCount()>99?'99+':EX.unreadCount()}</span>`:''}</a>`).join('')}
     </div>`;
   }).join('');
   const emp = EX.currentEmployee();
@@ -1591,8 +1596,7 @@ EX.sidebar = function(){
 };
 
 EX.topbar = function(){
-  const notifs = EX.myNotifications();
-  const unread = notifs.filter(n=>!n.read).length;
+  const unread = EX.unreadCount();
   return `<div class="flex items-center gap-3 px-4 lg:px-6 py-3 border-b sticky top-0 z-20" style="border-color:var(--ex-line);background:var(--ex-surface)/95;backdrop-filter:blur(6px)">
     <button class="lg:hidden ex-btn ex-btn-ghost !p-2" onclick="EX.toggleMobileNav()">${EX.icon('grid','w-4 h-4')}</button>
     <div class="relative flex-1 max-w-md">
@@ -1600,7 +1604,7 @@ EX.topbar = function(){
       <input placeholder="Search clients, leads, invoices, tasks…" class="ex-input !pl-8" onkeydown="if(event.key==='Enter'){EX.ui.globalSearch=this.value;EX.route('search')}"/>
     </div>
     <div class="flex-1"></div>
-    <button onclick="EX.route('notifications')" class="relative ex-btn ex-btn-ghost !p-2">${EX.icon('bell','w-4 h-4')}${unread?`<span class="absolute -top-0.5 -right-0.5 w-4 h-4 rounded-full text-[9px] flex items-center justify-center text-white" style="background:var(--ex-bad)">${unread}</span>`:''}</button>
+    <button onclick="EX.route('notifications')" id="bellBtn" aria-label="Notifications${unread?' ('+unread+' unread)':''}" class="relative ex-btn ex-btn-ghost !p-2">${EX.icon('bell','w-4 h-4')}${unread?`<span data-unread-badge class="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full text-[9px] flex items-center justify-center text-white" style="background:var(--ex-bad)">${unread>99?'99+':unread}</span>`:''}</button>
     ${EX.hasDemoData() ? `<span class="ex-pill ex-pill-demo hidden sm:inline-flex" title="${EX.demoDataCount()} seeded demo records are loaded. Clear them anytime in Settings.">DEMO DATA LOADED</span>` : ''}
   </div>`;
 };
@@ -1730,16 +1734,6 @@ EX.myNotifications = function(){
   return EX.get('notifications').filter(n=> n.targetEmployeeId===empId || (n.targetRole && n.targetRole===role) || n.targetRole==='*')
     .sort((a,b)=> (b._createdAt||0)-(a._createdAt||0));
 };
-EX.markNotifRead = async function(id){ await EX.patch('notifications', id, {read:true}); };
-EX.markAllNotifsRead = async function(){
-  const unread = EX.myNotifications().filter(n=>!n.read);
-  if(!unread.length) return;
-  try{
-    for(const n of unread) await EX.patch('notifications', n.id, {read:true});
-  }catch(e){ return; }
-  EX.toast(`Marked ${unread.length} notification${unread.length===1?'':'s'} as read`,'good');
-};
-
 /* ---- id/number generators ---- */
 EX.seqNumber = function(col, prefix, dateField){
   const year = new Date().getFullYear();
@@ -1753,7 +1747,7 @@ EX.seqNumber = function(col, prefix, dateField){
    shallow merge — nesting days inside one object made every write wipe the other days' history.
    Older records that live under doc.days[...] are still read (legacy). Attendance status is DERIVED
    (checked in / on approved leave / approved WFH / absent) — nobody marks it by hand any more. */
-EX.todayKey = (d)=>{ d = d||new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); };
+EX.todayKey = (d)=>{ d = d||new Date(EX.now()); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); };
 EX.utcDayKey = (ts)=> new Date(ts).toISOString().slice(0,10); // leave/WFH dates come from <input type=date> parsed as UTC midnight
 EX.attendanceFor = (empId)=> EX.byId('attendance', empId) || {id:empId, days:{}};
 EX.attDay = function(empId, day){
@@ -2251,16 +2245,6 @@ EX.views['search'] = function(){
 };
 
 /* ================= NOTIFICATIONS ================= */
-EX.views['notifications'] = function(){
-  const notifs = EX.myNotifications();
-  return `${EX.pageHead('Notifications', 'Role-specific alerts generated automatically by workspace activity.', notifs.length?`<button onclick="EX.markAllNotifsRead()" class="ex-btn ex-btn-ghost ex-btn-sm">Mark all read</button>`:'')}
-  <div class="ex-card divide-y" style="border-color:var(--ex-line)">
-    ${notifs.length? notifs.map(n=>`<a href="#/${n.link||'dashboard'}" onclick="EX.markNotifRead('${n.id}')" class="flex items-start gap-3 p-3.5 ${n.read?'':'bg-[var(--ex-blue-50)]'} hover:bg-[var(--ex-blue-50)]">
-      <span class="w-2 h-2 rounded-full mt-1.5 shrink-0" style="background:${n.read?'transparent':'var(--ex-blue-500)'}"></span>
-      <div class="flex-1"><div class="text-sm">${n.message}</div><div class="text-xs mt-0.5" style="color:var(--ex-ink-soft)">${EX.fmtDateTime(n._createdAt)}</div></div>
-    </a>`).join('') : `<div class="p-6">${EX.empty('No notifications yet')}</div>`}
-  </div>`;
-};
 /* ================= CRM / LEADS ================= */
 EX.salesEmployees = ()=> EX.get('employees').filter(e=>['sales_exec','super_admin','ops_head'].includes(EX.effRole(e.role)) && e.status==='Active');
 EX.LEAD_FIELDS = [
@@ -2885,7 +2869,7 @@ EX.clientDetail = function(id){
   if(!c) return EX.empty('Client not found');
   const tab = EX.ui.clientTab || 'overview';
   const finance = EX.canSeeFinancials();
-  let tabs = [['overview','Overview'],['services','Services'],['platforms','Platforms'],['content','Content'],['tasks','Tasks & Deliverables'],['performance','Performance'],['ads','Ads & Social'],['invoices','Billing'],['meetings','Meetings'],['extrawork','Additional Work'],['support','Support'],['health','Health & Contract']];
+  let tabs = [['overview','Overview'],['services','Services'],['platforms','Platforms'],['content','Content Studio'],['assets','Client Assets'],['tasks','Tasks & Deliverables'],['performance','Performance'],['ads','Ads & Social'],['invoices','Billing'],['meetings','Meetings'],['extrawork','Additional Work'],['support','Support'],['health','Health & Contract']];
   if(!finance) tabs = tabs.filter(([k])=>k!=='invoices');
   if(EX.canUseVault()) tabs.splice(3, 0, ['credentials','Credentials']);
   const activeTab = (!finance && tab==='invoices') ? 'overview' : tab;
@@ -2893,7 +2877,7 @@ EX.clientDetail = function(id){
   return `<a href="#/clients" class="text-xs inline-flex items-center gap-1 mb-3" style="color:var(--ex-ink-soft)">${EX.icon('chevron-left','w-3.5 h-3.5')} All clients</a>
   <div class="flex flex-wrap items-start justify-between gap-3 mb-4">
     <div class="flex items-center gap-3">${EX.avatar(c.companyName,44)}<div><h1 class="font-display text-xl font-bold">${c.companyName}</h1><div class="flex items-center gap-2 mt-0.5">${EX.pill(c.status)}${EX.pill(health.label)}<span class="text-xs" style="color:var(--ex-ink-soft)">${c.country||''}</span></div></div></div>
-    <div class="flex items-center gap-2">
+    <div class="flex flex-wrap items-center gap-2">
       <button onclick="EX.enterPortalPreview('${c.id}')" class="ex-btn ex-btn-ghost">${EX.icon('external','w-4 h-4')} Preview client portal</button>
       ${finance?`<button onclick="EX.editClientModal('${c.id}')" class="ex-btn ex-btn-ghost">${EX.icon('edit','w-4 h-4')} Edit</button>`:''}
       ${EX.canDelete()?(c.serviceStatus==='On Hold'?`<button onclick="EX.resumeClientWork('${c.id}')" class="ex-btn ex-btn-primary">Resume work</button>`:`<button onclick="EX.pauseClientWorkModal('${c.id}')" class="ex-btn ex-btn-ghost">Pause work</button>`)+`<button onclick="EX.deleteClientModal('${c.id}')" class="ex-btn ex-btn-ghost" style="color:var(--ex-bad)">${EX.icon('trash','w-4 h-4')} Delete</button>`:''}
@@ -2904,7 +2888,7 @@ EX.clientDetail = function(id){
     ${tabs.map(([k,l])=>`<button onclick="EX.ui.clientTab='${k}';EX.scheduleRender()" class="px-3 py-2 text-sm font-medium border-b-2 -mb-px whitespace-nowrap" style="border-color:${activeTab===k?'var(--ex-blue-600)':'transparent'};color:${activeTab===k?'var(--ex-blue-600)':'var(--ex-ink-soft)'}">${l}</button>`).join('')}
   </div>
   ${activeTab==='overview'?EX.clientOverview(c):''}${activeTab==='services'?EX.clientServicesTab(c):''}${activeTab==='platforms'?EX.clientPlatformsTab(c):''}${activeTab==='credentials'?EX.clientCredentialsTab(c):''}
-  ${activeTab==='content'?EX.clientContentTab(c):''}${activeTab==='tasks'?EX.clientTasksTab(c):''}${activeTab==='performance'?EX.clientPerformanceTab(c):''}${activeTab==='ads'?EX.clientAdsTab(c):''}
+  ${activeTab==='content'?EX.clientContentTab(c):''}${activeTab==='assets'?EX.clientAssetsTab(c):''}${activeTab==='tasks'?EX.clientTasksTab(c):''}${activeTab==='performance'?EX.clientPerformanceTab(c):''}${activeTab==='ads'?EX.clientAdsTab(c):''}
   ${activeTab==='invoices'&&finance?EX.clientBillingTab(c):''}${activeTab==='meetings'?EX.clientMeetingsTab(c):''}${activeTab==='extrawork'?EX.clientExtraWorkTab(c):''}${activeTab==='support'?EX.clientSupportTab(c):''}${activeTab==='health'?EX.clientHealthTab(c,health):''}`;
 };
 EX.editClientModal = function(id){
@@ -3299,6 +3283,7 @@ EX.performDeleteClient = async function(id){
       for(const [col] of EX.CLIENT_FINANCE_CASCADE){ for(const r of EX.get(col).filter(x=>x.clientId===id)){ await EX.patch(col, r.id, {deletedClientName:c.companyName}); } }
     }
     if(EX.byId('config','vault_'+id)) await EX.remove('config','vault_'+id);
+    for(const d of EX.get('config').filter(d=>d.kind==='clientAsset' && d.clientId===id)) await EX.remove('config', d.id);
     await EX.remove('clients', id);
   }catch(e){ EX.toast('Delete stopped part-way — some records may already be removed. Open the client list and try the delete again.','bad'); return; }
   await EX.addAudit('Deleted client','clients',id,{companyName:c.companyName,status:c.status,monthlyFee:c.monthlyFee||0,removed},null);
@@ -3311,7 +3296,9 @@ EX.clientContentTab = function(c){
   const items = EX.get('content').filter(x=>x.clientId===c.id);
   const t = EX.contentTrackerFor(c, ym);
   const kpi = (l,v,col)=>`<div class="ex-card p-3"><div class="ex-label">${l}</div><div class="font-display text-lg font-bold tnum" style="color:${col||'var(--ex-ink)'}">${v}</div></div>`;
-  return `<div class="flex flex-wrap items-center justify-between gap-2 mb-3"><div class="font-display font-bold text-sm">Monthly commitment — ${EX.monthLabel(ym)} <span class="ex-pill ex-pill-${t.tone} ml-1">${EX.esc(t.labelFull)}</span></div>${EX.contentMonthBar()}</div>
+  const studioStrip = `<div class="ex-card p-3 mb-3 flex flex-wrap items-center justify-between gap-2" id="clientStudioStrip"><div><div class="font-display font-bold text-sm">${EX.esc(c.companyName)} — Content Studio</div><div class="text-xs" style="color:var(--ex-ink-soft)">Plan, schedule and track this client's content.</div></div>
+    <div class="flex flex-wrap items-center gap-2">${EX.schedulerBlock(c)}<button type="button" onclick="EX.ui.clientTab='assets';EX.scheduleRender()" class="ex-btn ex-btn-ghost">${EX.icon('layers','w-4 h-4')} Client assets</button></div></div>`;
+  return `${studioStrip}<div class="flex flex-wrap items-center justify-between gap-2 mb-3"><div class="font-display font-bold text-sm">Monthly commitment — ${EX.monthLabel(ym)} <span class="ex-pill ex-pill-${t.tone} ml-1">${EX.esc(t.labelFull)}</span></div>${EX.contentMonthBar()}</div>
   ${t.pausedPartly?`<div class="rounded-xl p-3 mb-3 text-sm" style="background:var(--ex-warn-bg);color:var(--ex-warn)">Work ${t.paused?'is paused':'was paused for part of the month'} for this client in ${EX.monthLabel(ym)}${t.pausedPartly.reason?' ('+EX.esc(t.pausedPartly.reason)+')':''}${t.paused?' — commitments are not being chased.':'.'}</div>`:''}
   <div class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-3">${kpi('Committed',t.tot.committed)}${kpi('Delivered',t.tot.delivered+' / '+(t.target||0))}${kpi('Client approved',t.tot.approved,'var(--ex-good)')}${kpi('Re-work',t.tot.rework,t.tot.rework?'var(--ex-bad)':'')}${kpi('Pending approval',t.tot.pending,t.tot.pending?'var(--ex-warn)':'')}</div>
   <div class="ex-card p-4 mb-4"><div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
@@ -3328,6 +3315,7 @@ EX.clientContentTab = function(c){
       {label:'Status', get:x=>EX.pill(x.status)},
       {label:'Client approval', get:x=>EX.approvalPill(EX.contentApproval(x))},
       {label:'Deadline', get:x=>EX.fmtDate(x.deadline)},
+      {label:'Publish', get:x=>x.publishDate? EX.fmtDate(x.publishDate) : '—'},
       {label:'Assigned', get:x=>{const e=EX.byId('employees',x.assignedTo); return e?EX.esc(e.name):'—';}},
       {label:'Created by', get:x=>EX.esc(EX.contentCreatorLabel(x))},
     ].concat(EX.canDelete()?[{label:'',get:x=>EX.contentActionCell(x)}]:[]), emptyLabel:'No content items yet'})}`;
@@ -3341,13 +3329,14 @@ EX.addContentModal = function(clientId){
         {key:'forMonth',label:'Counts towards month',type:'month',hint:'Which month\'s committed deliverables this item belongs to.'},
         {key:'assignedTo',label:'Assigned to',type:'select',options:EX.assigneeOptions()},
         {key:'deadline',label:'Deadline',type:'date'},
+        {key:'publishDate',label:'Scheduled publish date (optional)',type:'date',hint:'The team and the client\'s DME are reminded as this date approaches.'},
       ],{forMonth:EX.ui.contentMonth||EX.monthKey(), assignedTo:(EX.canAssignOthers()?'':EX.session.employeeId)},2)}
       <div class="flex justify-end gap-2 pt-2"><button type="button" class="ex-btn ex-btn-ghost" onclick="EX.closeModal()">Cancel</button><button class="ex-btn ex-btn-primary">Create</button></div>
     </form>`);
 };
 EX.saveContent = async function(ev, clientId){
   ev.preventDefault();
-  const data = EX.readForm(ev.target, [{key:'title'},{key:'type'},{key:'forMonth'},{key:'assignedTo'},{key:'deadline',type:'date'}]);
+  const data = EX.readForm(ev.target, [{key:'title'},{key:'type'},{key:'forMonth'},{key:'assignedTo'},{key:'deadline',type:'date'},{key:'publishDate',type:'date'}]);
   if(!/^\d{4}-\d{2}$/.test(data.forMonth||'')) data.forMonth = data.deadline? EX.monthKey(new Date(data.deadline)) : (EX.ui.contentMonth||EX.monthKey());
   if(!EX.canAssignOthers()) data.assignedTo = EX.session.employeeId;
   data.clientId = clientId; data.status='Draft'; data.comments=[]; data.clientApproval='Pending';
@@ -3371,7 +3360,7 @@ EX.openContentDrawer = function(id){
       <div class="ex-label">Client approval <span class="font-normal" style="color:var(--ex-ink-soft)">— what the client has said about this item</span></div>
       <div class="flex flex-wrap gap-1.5 mb-4">${EX.CLIENT_APPROVALS.map(a=>`<button onclick="EX.setClientApproval('${id}','${a}')" class="ex-btn ex-btn-sm ${appr===a?(a==='Approved'?'ex-btn-primary':a==='Re-work'?'ex-btn-danger':'ex-btn-primary'):'ex-btn-ghost'}">${a}</button>`).join('')}</div>
       ${EX.canAssignOthers()?`<div class="mb-4"><label class="ex-label">Assigned to <span class="font-normal" style="color:var(--ex-ink-soft)">— also moves the linked task</span></label><select id="contentAssignee" onchange="EX.setContentAssignee('${id}',this.value)" class="ex-select">${EX.assigneeOptions(x.assignedTo).map(o=>`<option value="${EX.esc(o.value)}" ${o.value===(x.assignedTo||'')?'selected':''}>${EX.esc(o.label)}</option>`).join('')}</select></div>`:''}
-      <div class="grid grid-cols-2 gap-3 mb-4"><div><label class="ex-label">Counts towards month</label><input type="month" value="${EX.contentMonth(x)}" onchange="EX.setContentForMonth('${id}',this.value)" class="ex-input"/></div></div>
+      <div class="grid grid-cols-2 gap-3 mb-4"><div><label class="ex-label">Counts towards month</label><input type="month" value="${EX.contentMonth(x)}" onchange="EX.setContentForMonth('${id}',this.value)" class="ex-input"/></div><div><label class="ex-label" for="contentPublish">Scheduled publish date</label><input id="contentPublish" type="date" value="${x.publishDate?EX.utcDayKey(x.publishDate):''}" onchange="EX.setContentPublishDate('${id}',this.value)" class="ex-input"/></div></div>
       ${EX.contentLinkedTasksBlock(x)}
       <div class="ex-label">Comments</div>
       <div class="space-y-2 mb-3 max-h-40 overflow-y-auto">${(x.comments||[]).map(cm=>`<div class="text-sm"><b>${EX.esc(cm.by)}:</b> ${EX.esc(cm.text)}</div>`).join('')||'<div class="text-xs" style="color:var(--ex-ink-soft)">No comments yet</div>'}</div>
@@ -3379,6 +3368,7 @@ EX.openContentDrawer = function(id){
       ${EX.canDelete()?`<div class="mt-4 pt-3 border-t" style="border-color:var(--ex-line)"><button onclick="EX.closeModal();EX.deleteContent('${id}')" class="ex-btn ex-btn-ghost ex-btn-sm" style="color:var(--ex-bad)">${EX.icon('trash','w-3.5 h-3.5')} Delete content item</button></div>`:''}
     </div></div>`);
 };
+EX.setContentPublishDate = async function(id, val){ await EX.patch('content', id, {publishDate: val? new Date(val).getTime() : null}); EX.toast(val? 'Publish date saved' : 'Publish date cleared','good'); };
 EX.setContentForMonth = async function(id, ym){
   if(!/^\d{4}-\d{2}$/.test(ym||'')) return;
   await EX.patch('content', id, {forMonth: ym}); EX.toast('Month updated','good');
@@ -3389,10 +3379,11 @@ EX.setContentStatus = async function(id, status){
   const x = EX.byId('content', id);
   const isLate = x.deadline && EX.now()>x.deadline && status==='Published';
   if(isLate && !x.lateReason){ EX.closeModal(); return EX.lateReasonModal(id, status); }
-  const sync = EX.approvalForStatus(status);
+  const sync = EX.approvalForStatus(status); const prevStatus = x.status;
   await EX.patch('content', id, Object.assign({status}, sync?{clientApproval:sync}:{}));
   await EX.syncTasksFromContent(id);
-  await EX.addAudit('Content status changed','content',id,{status:x.status},{status});
+  if(prevStatus!==status && ['Approved','Rejected','Revision'].includes(status)) await EX.notifyContentOutcome(EX.byId('content', id), status==='Approved'?'approved':status==='Rejected'?'rejected':'revision');
+  await EX.addAudit('Content status changed','content',id,{status:prevStatus},{status});
   EX.closeModal(); EX.toast(`Status → ${status}`,'good');
 };
 EX.lateReasonModal = function(id, status){
@@ -3428,9 +3419,9 @@ EX.clientTasksTab = function(c){
   const pct = allItems.length? Math.round(done/allItems.length*100) : 0;
   return `<div class="ex-card p-4 mb-3"><div class="flex items-center justify-between mb-1"><span class="text-sm font-semibold">Deliverable completion</span><span class="text-sm font-semibold tnum">${pct}%</span></div>
     <div class="h-2 rounded-full" style="background:var(--ex-line)"><div class="h-2 rounded-full" style="width:${pct}%;background:var(--ex-good)"></div></div></div>
-  <div class="flex items-center justify-between mb-2"><span class="text-xs" style="color:var(--ex-ink-soft)">${archivedN?`${archivedN} completed task${archivedN===1?'':'s'} older than ${EX.ARCHIVE_AFTER_DAYS} days kept in <a href="#/taskhistory" class="underline">Task History</a>`:''}</span><button onclick="EX.showAddTaskModal(null,'${c.id}')" class="ex-btn ex-btn-primary ex-btn-sm">${EX.icon('plus','w-3.5 h-3.5')} New task</button></div>
+  <div class="flex items-center justify-between mb-2"><span class="text-xs" style="color:var(--ex-ink-soft)">${archivedN?`${archivedN} completed task${archivedN===1?'':'s'} kept in <a href="#/taskhistory" class="underline">Completed Tasks</a>`:''}</span><button onclick="EX.showAddTaskModal(null,'${c.id}')" class="ex-btn ex-btn-primary ex-btn-sm">${EX.icon('plus','w-3.5 h-3.5')} New task</button></div>
   ${EX.dataTable({id:'clientTasks_'+c.id, rows:items, searchKey:t=>t.title, filterOptions:EX.TASK_STATUSES, filterKey:t=>t.status, filterLabel:'status', rowClick:t=>`EX.openTaskDrawer('${t.id}')`,
-    columns:[{label:'Task',get:t=>t.title},{label:'Type',get:t=>t.type},{label:'Assigned',get:t=>t.assignedToName||'—'},{label:'Content',get:t=>EX.taskContentCell(t)},{label:'Created by',get:t=>EX.taskCreatorLabel(t)},{label:'Deadline',get:t=>EX.fmtDate(t.deadline)},{label:'Status',get:t=>EX.pill(t.status)}].concat(EX.canDelete()?[{label:'',get:t=>EX.taskActionCell(t)}]:[]), emptyLabel:'No tasks yet'})}`;
+    columns:[{label:'Task',get:t=>t.title},{label:'Type',get:t=>t.type},{label:'Assigned',get:t=>t.assignedToName||'—'},{label:'Content',get:t=>EX.taskContentCell(t)},{label:'Created by',get:t=>EX.taskCreatorLabel(t)},{label:'Deadline',get:t=>EX.deadlineCell(t)},{label:'Status',get:t=>EX.pill(t.status)}].concat(EX.canDelete()?[{label:'',get:t=>EX.taskActionCell(t)}]:[]), emptyLabel:'No tasks yet'})}`;
 };
 EX.clientBillingTab = function(c){
   const invs = EX.get('invoices').filter(i=>i.clientId===c.id);
@@ -3751,8 +3742,10 @@ EX.setClientApproval = async function(id, val){
   if(val==='Approved' && ['Draft','Submitted','Revision','Rejected'].includes(x.status)) patch.status = 'Approved';
   if(val==='Re-work' && ['Draft','Submitted','Approved'].includes(x.status)) { patch.status = 'Revision'; patch.revisionCount = (x.revisionCount||0)+1; }
   if(val==='Pending' && ['Approved','Revision','Rejected'].includes(x.status)) patch.status = 'Submitted';
+  const prevStatus = x.status; const prevApproval = EX.contentApproval(x);
   try{ await EX.patch('content', id, patch); }catch(e){ return; }
   await EX.syncTasksFromContent(id);
+  { const nowX = EX.byId('content', id); if(nowX && val!==prevApproval && ['Approved','Re-work'].includes(val)) await EX.notifyContentOutcome(nowX, val==='Approved'?'approved':'revision'); }
   await EX.addAudit('Client approval recorded','content',id,{clientApproval:EX.contentApproval(x)},{clientApproval:val});
   EX.toast('Client approval: '+val, val==='Approved'?'good':val==='Re-work'?'warn':'good');
   if(EX.byId('content',id) && document.getElementById('contentDrawerRoot')) EX.openContentDrawer(id);
@@ -3766,6 +3759,7 @@ EX.views['content'] = function(){
   items = items.map(x=> Object.assign({}, x, {clientName:(EX.byId('clients',x.clientId)||{}).companyName}));
   const ym = EX.ui.contentMonth || EX.monthKey();
   return `${EX.pageHead('Content Studio', isManager? 'Monthly commitments, delivery and client approvals' : (role==='dme'?'Your clients\' monthly progress and your content':'Content assigned to you'), `${showTracker?EX.contentMonthBar():''}${showTracker?`<button onclick="EX.downloadContentTrackerPdf('${ym}')" class="ex-btn ex-btn-ghost">${EX.icon('file-text','w-4 h-4')} Tracker PDF</button>`:''}<button onclick="EX.showCreateContentModal()" class="ex-btn ex-btn-primary">${EX.icon('plus','w-4 h-4')} New content item</button>`)}
+  ${EX.clientStudioPanel()}
   ${showTracker?`<div class="font-display font-bold text-sm mb-2">Committed vs delivered — ${EX.monthLabel(ym)}</div>${EX.contentTrackerSection()}<div class="font-display font-bold text-sm mb-2">All content</div>`:''}
   ${EX.dataTable({id:'contentGlobal', rows:items, searchKey:x=>`${x.title} ${x.clientName}`, filterOptions:EX.CONTENT_STATUSES, filterKey:x=>x.status, filterLabel:'status',
     rowClick:x=>`EX.openContentDrawer('${x.id}')`,
@@ -3830,6 +3824,7 @@ EX.saveShoot = async function(ev, id){
 /* ================= TASKS (global) ================= */
 EX.TASK_FIELDS = [
   {key:'title', label:'Task title', required:true, full:true},
+  {key:'description', label:'Description (optional)', type:'textarea', full:true, rows:3},
   {key:'clientId', label:'Client (optional)', type:'select', options:[]},
   {key:'type', label:'Type', type:'select', options:EX.TASK_TYPES},
   {key:'assignedTo', label:'Assigned to', type:'select', options:[]},
@@ -3886,11 +3881,11 @@ EX.views['tasks'] = function(){
   let items = EX.activeTasks();
   if(!isManager) items = items.filter(t=>t.assignedTo===EX.session.employeeId || t._createdBy===EX.session.employeeId);
   items = items.map(t=>Object.assign({},t,{clientName:(EX.byId('clients',t.clientId)||{}).companyName||''}));
-  return `${EX.pageHead('Tasks', isManager?'All tasks across the team':'Tasks assigned to you, and tasks you created', EX.canCreateTasks(role)?`<button onclick="EX.showAddTaskModal()" class="ex-btn ex-btn-primary">${EX.icon('plus','w-4 h-4')} New task</button>`:'')}
+  return `${EX.pageHead('Tasks', isManager?'All tasks across the team':'Tasks assigned to you, and tasks you created', `<a href="#/taskhistory" id="completedTasksLink" class="ex-btn ex-btn-ghost">${EX.icon('check','w-4 h-4')} Completed tasks</a>`+(EX.canCreateTasks(role)?`<button onclick="EX.showAddTaskModal()" class="ex-btn ex-btn-primary">${EX.icon('plus','w-4 h-4')} New task</button>`:''))}
   ${EX.archiveNote()}
   ${EX.dataTable({id:'tasksGlobal', rows:items, searchKey:t=>`${t.title} ${t.clientName} ${t.assignedToName||''}`, filterOptions:EX.TASK_STATUSES, filterKey:t=>t.status, filterLabel:'status', rowClick:t=>`EX.openTaskDrawer('${t.id}')`,
     columns:[{label:'Task',get:t=>t.title},{label:'Client',get:t=>t.clientName||'—'},{label:'Type',get:t=>t.type||'—'},{label:'Assigned',get:t=>t.assignedToName||'—'},{label:'Content',get:t=>EX.taskContentCell(t)},
-      {label:'Created by',get:t=>EX.taskCreatorLabel(t)},{label:'Priority',get:t=>t.priority?EX.pill(t.priority==='Urgent'||t.priority==='High'?'Overdue':'New'):'—'},{label:'Deadline',get:t=>EX.fmtDate(t.deadline)},{label:'Status',get:t=>EX.pill(t.status)}].concat(EX.canDelete()?[{label:'',get:t=>EX.taskActionCell(t)}]:[]),
+      {label:'Created by',get:t=>EX.taskCreatorLabel(t)},{label:'Priority',get:t=>t.priority?EX.pill(t.priority==='Urgent'||t.priority==='High'?'Overdue':'New'):'—'},{label:'Deadline',get:t=>EX.deadlineCell(t)},{label:'Status',get:t=>EX.pill(t.status)}].concat(EX.canDelete()?[{label:'',get:t=>EX.taskActionCell(t)}]:[]),
     emptyLabel:'No tasks yet'})}`;
 };
 EX.showAddTaskModal = function(taskId, clientId){
@@ -3935,12 +3930,16 @@ EX.saveTask = async function(ev, taskId){
   } else {
     data.contentId = null;
   }
-  if(taskId){ await EX.patch('tasks', taskId, data);
+  if(taskId){
+    const before = Object.assign({}, EX.byId('tasks', taskId)); const changed = EX.taskChanges(before, data);
+    if(changed.length) data.history = EX.taskHist(before, {action:'Edited', note:changed.join(', ')});
+    await EX.patch('tasks', taskId, data);
+    if(changed.length) await EX.notifyTaskEdited(before, EX.byId('tasks', taskId), changed);
     // keep the linked content item's owner in step with the task
     if(data.contentId){ const cx = EX.byId('content', data.contentId); if(cx && (cx.assignedTo||'')!==(data.assignedTo||'')){ try{ await EX.patch('content', cx.id, {assignedTo:data.assignedTo||''}); }catch(e){} } }
   }
   else { data.status='To Do'; data.revisionCount=0; const id = await EX.add('tasks', data);
-    if(data.assignedTo && data.assignedTo!==EX.session.employeeId) await EX.addNotification({targetEmployeeId:data.assignedTo, message:`New task assigned: ${data.title}`, link:'tasks'});
+    await EX.notifyTaskAssigned(Object.assign({id}, data));
   }
   EX.closeModal(); EX.toast('Saved','good');
 };
@@ -3949,9 +3948,9 @@ EX.openTaskDrawer = function(id){
   const c = t.clientId? EX.byId('clients', t.clientId) : null;
   EX.openModal(`${EX.modalHeader(t.title, (c?c.companyName+' · ':'')+(t.type||''))}
     <div class="p-5">
-      <div class="flex items-center gap-2 mb-3">${EX.pill(t.status)}${t.priority?EX.pill(t.priority):''}<span class="text-xs" style="color:var(--ex-ink-soft)">Deadline ${EX.fmtDate(t.deadline)}</span></div>
+      <div class="flex items-center gap-2 mb-3">${EX.pill(t.status)}${t.priority?EX.pill(t.priority):''}${EX.taskOverdue(t)?'<span class="ex-pill ex-pill-bad">Overdue</span>':''}<span class="text-xs" style="color:var(--ex-ink-soft)">Deadline ${EX.fmtDate(t.deadline)}</span></div>
       <div class="text-xs mb-3" style="color:var(--ex-ink-soft)">Created by <b>${EX.taskCreatorLabel(t)}</b>${t._createdAt?' on '+EX.fmtDate(t._createdAt):''}${t.assignedToName?' · Assigned to <b>'+t.assignedToName+'</b>':''}</div>
-      ${EX.taskArchiveNote(t)}${EX.taskLinkedContentBlock(t)}
+      ${EX.taskArchiveNote(t)}${EX.taskDescriptionBlock(t)}${EX.taskReopenBlock(t)}${EX.taskLinkedContentBlock(t)}${EX.taskHistoryBlock(t)}
       <div class="flex flex-wrap gap-1.5 mb-4">${EX.TASK_STATUSES.map(s=>`<button onclick="EX.setTaskStatus('${id}','${s}')" class="ex-btn ex-btn-sm ${t.status===s?'ex-btn-primary':'ex-btn-ghost'}">${s}</button>`).join('')}</div>
       <div class="grid grid-cols-2 gap-3 mb-3">
         <div><label class="ex-label">Estimated hours</label><input value="${t.estimatedHours||''}" disabled class="ex-input"/></div>
@@ -3965,12 +3964,18 @@ EX.openTaskDrawer = function(id){
     </div>`);
 };
 EX.setTaskStatus = async function(id, status){
-  const t = EX.byId('tasks', id);
+  const t = EX.byId('tasks', id); if(!t) return;
+  const from = t.status; const changed = from!==status;
   const patch = {status};
   if(status==='Done') patch.completedAt = EX.now();
+  if(changed) patch.history = EX.taskHist(t, {action:'Status', from, to:status});
   await EX.patch('tasks', id, patch);
   await EX.syncContentFromTask(id);
-  EX.closeModal(); EX.toast(`Status → ${status}`,'good');
+  if(changed) await EX.notifyTaskStatus(EX.byId('tasks', id), from, status);
+  EX.closeModal();
+  const now = EX.byId('tasks', id);
+  if(status==='Done' && now && EX.isTaskArchived(now)) EX.toast('Task completed — moved to Completed Tasks (kept for reports)','good');
+  else EX.toast(`Status → ${status}`,'good');
 };
 EX.setTaskActualHours = async function(id, val){ await EX.patch('tasks', id, {actualHours: val?Number(val):null}); EX.toast('Hours logged','good'); };
 EX.bumpRevision = async function(id){ const t=EX.byId('tasks',id); await EX.patch('tasks', id, {revisionCount:(t.revisionCount||0)+1}); EX.toast('Revision logged','warn'); EX.openTaskDrawer(id); };
@@ -5242,9 +5247,8 @@ EX.EOD_MANAGERS = ['super_admin','ops_head','creative_head','hr'];
 // Completed tasks stay in the active lists for 7 days, then move to Task History automatically.
 // Nothing is deleted: "archived" is worked out from the completion date, so the full history stays
 // available for search and for every report.
-EX.ARCHIVE_AFTER_DAYS = 7;
 EX.taskDoneAt = (t)=> t.completedAt || t._updatedAt || t._createdAt || 0;
-EX.isTaskArchived = (t)=> t.status==='Done' && (EX.now() - EX.taskDoneAt(t)) > EX.ARCHIVE_AFTER_DAYS*86400000;
+EX.isTaskArchived = (t)=> t.status==='Done' && (EX.now() - EX.taskDoneAt(t)) >= EX.archiveDelayMs();
 EX.activeTasks = ()=> EX.get('tasks').filter(t=>!EX.isTaskArchived(t));
 EX.dayKeyOf = (ts)=> EX.todayKey(new Date(ts));
 EX.taskOverdue = (t, day)=> !!(t.deadline && t.status!=='Done' && EX.utcDayKey(t.deadline) < (day||EX.todayKey()));
@@ -5252,14 +5256,14 @@ EX.taskArchiveNote = function(t){
   if(t.status!=='Done') return '';
   const doneAt = EX.taskDoneAt(t);
   return EX.isTaskArchived(t)
-    ? `<div class="text-xs mb-3" style="color:var(--ex-ink-soft)">Completed ${EX.fmtDate(doneAt)} · moved to Task History (archived, never deleted).</div>`
-    : `<div class="text-xs mb-3" style="color:var(--ex-ink-soft)">Completed ${EX.fmtDate(doneAt)} · moves to Task History on ${EX.fmtDate(doneAt + EX.ARCHIVE_AFTER_DAYS*86400000)}.</div>`;
+    ? `<div class="text-xs mb-3" style="color:var(--ex-ink-soft)">Completed ${EX.fmtDate(doneAt)} · moved to Completed Tasks (hidden from the active list, never deleted).</div>`
+    : `<div class="text-xs mb-3" style="color:var(--ex-ink-soft)">Completed ${EX.fmtDate(doneAt)} · leaves the active list ${EX.archiveLabel()==="immediately"?'immediately':'on '+EX.fmtDate(doneAt + EX.archiveDelayMs())} (kept in Completed Tasks).</div>`;
 };
 EX.canSeeAllTaskHistory = ()=> EX.EOD_MANAGERS.includes(EX.currentRole());
 EX.archiveNote = function(){
   const all = EX.canSeeAllTaskHistory(); const me = EX.session.employeeId;
   const n = EX.get('tasks').filter(t=>EX.isTaskArchived(t) && (all || t.assignedTo===me)).length;
-  return n? `<div class="text-xs mb-2" style="color:var(--ex-ink-soft)">${n} completed task${n===1?'':'s'} older than ${EX.ARCHIVE_AFTER_DAYS} days ${n===1?'is':'are'} kept in <a href="#/taskhistory" class="underline" style="color:var(--ex-blue-600)">Task History</a> (search by date).</div>` : '';
+  return n? `<div class="text-xs mb-2" style="color:var(--ex-ink-soft)">${n} completed task${n===1?'':'s'} ${n===1?'is':'are'} kept in <a href="#/taskhistory" class="underline" style="color:var(--ex-blue-600)">Completed Tasks</a> (search, filter or reopen).</div>` : '';
 };
 
 /* ---- Team Tasks: find an employee and see everything assigned to them (Super Admin / MD and Creative Head only) ---- */
@@ -5329,29 +5333,13 @@ EX.views['taskmonitor'] = function(){
       ${[['','All tasks'],['pending','Pending (To Do)'],['ongoing','Ongoing (In Progress / Revision)'],['hold','On hold / Review'],['done','Completed'],['overdue','Overdue']].map(([v,l])=>`<option value="${v}" ${st.status===v?'selected':''}>${l}</option>`).join('')}
     </select>
     <select id="tmClient" class="ex-select !w-auto text-xs" onchange="EX.tmSet('client',this.value)"><option value="">All clients</option>${clients.map(c=>`<option value="${c.id}" ${st.client===c.id?'selected':''}>${EX.esc(c.companyName)}</option>`).join('')}</select>
-    <label class="flex items-center gap-1.5 text-xs"><input type="checkbox" id="tmArch" ${st.archived?'checked':''} onchange="EX.tmSet('archived',this.checked)"/> Include archived (completed more than ${EX.ARCHIVE_AFTER_DAYS} days ago)</label>
+    <label class="flex items-center gap-1.5 text-xs"><input type="checkbox" id="tmArch" ${st.archived?'checked':''} onchange="EX.tmSet('archived',this.checked)"/> Include completed tasks hidden from the active list</label>
   </div>
   <div id="tmResults">${EX.tmResultsHtml()}</div>
-  <div class="text-[11px] mt-2" style="color:var(--ex-ink-soft)">Pending = To Do · Ongoing = In Progress or Revision · On hold / review = Blocked or waiting for review · Completed tasks move to <a href="#/taskhistory" class="underline">Task History</a> after ${EX.ARCHIVE_AFTER_DAYS} days.</div>`;
+  <div class="text-[11px] mt-2" style="color:var(--ex-ink-soft)">Pending = To Do · Ongoing = In Progress or Revision · On hold / review = Blocked or waiting for review · Completed tasks move to <a href="#/taskhistory" class="underline">Completed Tasks</a> ${EX.archiveLabel()}.</div>`;
 };
 
 /* ---- Task History: archived (and recent) completed tasks, searchable by date / date range ---- */
-EX.thResults = function(){
-  const ui = EX.ui; const ym = ui.thMonth || EX.monthKey();
-  const all = EX.canSeeAllTaskHistory(); const me = EX.session.employeeId;
-  let pool = EX.get('tasks').filter(t=>t.status==='Done');
-  if(!all) pool = pool.filter(t=>t.assignedTo===me);
-  else if(ui.thEmp) pool = pool.filter(t=>t.assignedTo===ui.thEmp);
-  if(ui.thClient) pool = pool.filter(t=>t.clientId===ui.thClient);
-  if(ui.thScope==='archived') pool = pool.filter(EX.isTaskArchived);
-  const dayOf = (t)=> EX.dayKeyOf(EX.taskDoneAt(t));
-  const from = ui.thFrom || '', to = ui.thTo || ui.thFrom || '';
-  const ranged = !!(ui.thFrom || ui.thTo);
-  const results = (ranged ? pool.filter(t=>{ const d = dayOf(t); return (!from || d>=from) && (!to || d<=to); }) : pool.filter(t=>dayOf(t).startsWith(ym)))
-    .sort((a,b)=> EX.taskDoneAt(b)-EX.taskDoneAt(a));
-  const perDay = {}; pool.forEach(t=>{ const d = dayOf(t); if(d.startsWith(ym)) perDay[d] = (perDay[d]||0)+1; });
-  return {ym, pool, results, perDay, from, to, ranged};
-};
 EX.thSet = function(k, v){ EX.ui[k] = v; EX.scheduleRender(); };
 EX.thShift = function(delta){ EX.ui.thMonth = EX.shiftMonth(EX.ui.thMonth || EX.monthKey(), delta); EX.scheduleRender(); };
 EX.thPick = function(day){
@@ -5367,45 +5355,6 @@ EX.thExportCsv = async function(){
   const csv = EX.toCsv(results, [{label:'Task',get:t=>t.title},{label:'Client',get:t=>(EX.byId('clients',t.clientId)||{}).companyName||''},{label:'Assigned to',get:t=>t.assignedToName||''},{label:'Completed on',get:t=>EX.dayKeyOf(EX.taskDoneAt(t))},{label:'Type',get:t=>t.type||''},{label:'Priority',get:t=>t.priority||''},{label:'Deadline',get:t=>t.deadline?EX.utcDayKey(t.deadline):''},{label:'Linked content',get:t=>{ const x=t.contentId&&EX.byId('content',t.contentId); return x?x.title:''; }},{label:'Archived',get:t=>EX.isTaskArchived(t)?'Yes':'No'}]);
   await EX.downloadFile('Task-History.csv', csv);
 };
-EX.views['taskhistory'] = function(){
-  const ui = EX.ui; const r = EX.thResults(); const all = EX.canSeeAllTaskHistory();
-  const [Y,M] = r.ym.split('-').map(Number);
-  const first = new Date(Y, M-1, 1).getDay(); const days = new Date(Y, M, 0).getDate();
-  const inSel = (k)=> r.ranged && (!r.from || k>=r.from) && (!r.to || k<=r.to);
-  let cells = ''; for(let i=0;i<first;i++) cells += '<div></div>';
-  for(let d=1; d<=days; d++){
-    const k = r.ym+'-'+String(d).padStart(2,'0'); const n = r.perDay[k]||0; const sel = inSel(k);
-    cells += `<button type="button" data-day="${k}" onclick="EX.thPick('${k}')" class="rounded-lg p-1.5 text-center border" style="border-color:${sel?'var(--ex-blue-600)':'var(--ex-line)'};background:${sel?'var(--ex-blue-100)':(n?'var(--ex-blue-50)':'transparent')}"><div class="text-xs">${d}</div><div class="text-[10px] font-semibold tnum" style="color:${n?'var(--ex-good)':'var(--ex-ink-soft)'}">${n||'·'}</div></button>`;
-  }
-  const emps = EX.get('employees').slice().sort((a,b)=>(a.name||'').localeCompare(b.name||''));
-  const clients = EX.get('clients').slice().sort((a,b)=>(a.companyName||'').localeCompare(b.companyName||''));
-  const label = r.ranged ? (r.from===r.to||!r.to ? EX.fmtDate(new Date(r.from+'T00:00:00').getTime()) : `${r.from?EX.fmtDate(new Date(r.from+'T00:00:00').getTime()):'…'} → ${r.to?EX.fmtDate(new Date(r.to+'T00:00:00').getTime()):'…'}`) : EX.monthLabel(r.ym);
-  return `${EX.pageHead('Task History', all? 'Every completed task — recent and archived. Pick a date or a range on the calendar.' : 'Your completed tasks — recent and archived. Pick a date or a range on the calendar.',
-    `<button onclick="EX.thExportCsv()" class="ex-btn ex-btn-ghost">${EX.icon('download','w-4 h-4')} CSV</button>`)}
-  <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-4">
-    <div class="ex-card p-4">
-      <div class="flex items-center justify-between mb-2"><button onclick="EX.thShift(-1)" class="ex-btn ex-btn-ghost ex-btn-sm">${EX.icon('chevron-left','w-3.5 h-3.5')}</button><div class="font-display font-bold text-sm">${EX.monthLabel(r.ym)}</div><button onclick="EX.thShift(1)" class="ex-btn ex-btn-ghost ex-btn-sm">${EX.icon('chevron-right','w-3.5 h-3.5')}</button></div>
-      <div class="grid grid-cols-7 gap-1 text-center text-[10px] mb-1" style="color:var(--ex-ink-soft)">${['Su','Mo','Tu','We','Th','Fr','Sa'].map(d=>`<div>${d}</div>`).join('')}</div>
-      <div class="grid grid-cols-7 gap-1" id="thCalendar">${cells}</div>
-      <div class="text-[11px] mt-2" style="color:var(--ex-ink-soft)">Numbers show tasks completed that day. Click a day, then another day to select a range.</div>
-    </div>
-    <div class="ex-card p-4 lg:col-span-2">
-      <div class="font-display font-bold text-sm mb-3">Find completed tasks</div>
-      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <div><label class="ex-label">From date</label><input type="date" id="thFrom" class="ex-input" value="${ui.thFrom||''}" onchange="EX.thSet('thFrom',this.value)"/></div>
-        <div><label class="ex-label">To date</label><input type="date" id="thTo" class="ex-input" value="${ui.thTo||''}" onchange="EX.thSet('thTo',this.value)"/></div>
-        ${all?`<div><label class="ex-label">Employee</label><select id="thEmp" class="ex-select" onchange="EX.thSet('thEmp',this.value)"><option value="">Everyone</option>${emps.map(e=>`<option value="${e.id}" ${ui.thEmp===e.id?'selected':''}>${EX.esc(e.name)}</option>`).join('')}</select></div>`:''}
-        <div><label class="ex-label">Client</label><select id="thClient" class="ex-select" onchange="EX.thSet('thClient',this.value)"><option value="">All clients</option>${clients.map(c=>`<option value="${c.id}" ${ui.thClient===c.id?'selected':''}>${EX.esc(c.companyName)}</option>`).join('')}</select></div>
-        <div><label class="ex-label">Show</label><select id="thScope" class="ex-select" onchange="EX.thSet('thScope',this.value)"><option value="all" ${ui.thScope!=='archived'?'selected':''}>All completed tasks</option><option value="archived" ${ui.thScope==='archived'?'selected':''}>Archived only (older than ${EX.ARCHIVE_AFTER_DAYS} days)</option></select></div>
-      </div>
-      <div class="flex items-center gap-2 mt-3"><button onclick="EX.thClear()" class="ex-btn ex-btn-ghost ex-btn-sm">Clear dates</button><span class="text-xs" style="color:var(--ex-ink-soft)">Showing <b>${r.results.length}</b> task${r.results.length===1?'':'s'} · ${label}</span></div>
-    </div>
-  </div>
-  <div class="ex-card overflow-hidden"><div class="overflow-x-auto"><table class="ex-table" id="thTable"><thead><tr><th>Completed</th><th>Task</th><th>Client</th><th>Assigned</th><th>Linked content</th><th>Where</th></tr></thead><tbody>
-    ${r.results.length? r.results.map(t=>`<tr style="cursor:pointer" onclick="EX.openTaskDrawer('${t.id}')"><td>${EX.fmtDate(EX.taskDoneAt(t))}</td><td>${EX.esc(t.title)}</td><td>${EX.esc((EX.byId('clients',t.clientId)||{}).companyName||'—')}</td><td>${EX.esc(t.assignedToName||'—')}</td><td>${EX.taskContentCell(t)}</td><td>${EX.isTaskArchived(t)?'<span class="ex-pill ex-pill-neutral">Archived</span>':'<span class="ex-pill ex-pill-good">Active list</span>'}</td></tr>`).join('') : `<tr><td colspan="6">${EX.empty('No completed tasks for this selection','Try another date range, or clear the filters.')}</td></tr>`}
-  </tbody></table></div></div>`;
-};
-
 /* ================= TASK <-> CONTENT LINK (optional) ================= */
 EX.TASK_CONTENT_TYPES = ['Poster','Static Design','Social Media Creative','Carousel','Reel','Video','Motion Graphics','YouTube Video','Infographic','AI Video','Photo','Other'];
 EX.taskContentOptions = function(clientId, selected){
@@ -5737,7 +5686,7 @@ EX.syncTasksFromContent = async function(contentId){
       else if(['Revision','Rejected'].includes(x.status)) to = ['Done','Review','To Do'].includes(t.status)? 'Revision' : null;
       else if(x.status==='Submitted') to = ['To Do','In Progress','Revision'].includes(t.status)? 'Review' : null;
       if(!to) continue;
-      const patch = {status:to}; if(to==='Done') patch.completedAt = EX.now();
+      const patch = {status:to, history:EX.taskHist(t, {action:'Status', from:t.status, to, byName:'Content Studio', by:''})}; if(to==='Done') patch.completedAt = EX.now();
       if(to==='Revision' && t.status==='Done') patch.revisionCount = (t.revisionCount||0)+1;
       await EX.patch('tasks', t.id, patch);
     }
@@ -5777,6 +5726,572 @@ EX.backfillContentTasks = async function(){
   }catch(e){ console.warn('content task backfill', e); }
   finally{ EX._ctBusy = false; }
   return n;
+};
+
+/* ================= CLIENT STUDIO: SCHEDULER LINK + CLIENT ASSETS ================= */
+// Every client has (1) ONE scheduler link of its own (field "schedulerUrl" on the client) and (2) an asset library.
+// Assets are stored as small documents in the existing "config" table (id "asset_<clientId>_<random>", kind "clientAsset"),
+// one document per asset, so two people editing different assets never overwrite each other and no database change is needed.
+EX.normalizeUrl = function(raw){
+  let s = String(raw||'').trim();
+  if(!s) return {ok:false, error:'Please enter a link.'};
+  if(/\s/.test(s)) return {ok:false, error:'A link cannot contain spaces.'};
+  if(!/^[a-z][a-z0-9+.-]*:/i.test(s)) s = 'https://'+s;
+  let u; try{ u = new URL(s); }catch(e){ return {ok:false, error:'That does not look like a valid web address.'}; }
+  if(!/^https?:$/.test(u.protocol)) return {ok:false, error:'Only http:// or https:// links are allowed.'};
+  if(!u.hostname || (u.hostname.indexOf('.')<0 && u.hostname!=='localhost')) return {ok:false, error:'That does not look like a valid web address.'};
+  return {ok:true, url:u.toString(), key:(u.hostname.replace(/^www\./i,'')+u.pathname.replace(/\/+$/,'')+u.search).toLowerCase()};
+};
+EX.hostOf = (url)=>{ try{ return new URL(url).hostname.replace(/^www\./i,''); }catch(e){ return ''; } };
+
+/* ---- scheduler link ---- */
+// Who may add / change a client's scheduler link: Super Admin / MD, Operations Head / CEO (and DM Manager), and the Digital Marketing Executive assigned to that client.
+EX.canEditScheduler = function(c){
+  const e = EX.currentEmployee(); if(!e || EX.session.mode!=='staff' || e.status==='Removed') return false;
+  const r = EX.currentRole();
+  if(r==='super_admin' || r==='ops_head') return true;
+  return r==='dme' && !!c && c.assignedDme===e.id;
+};
+EX.schedulerKeyOf = (c)=>{ const n = EX.normalizeUrl(c && c.schedulerUrl); return n.ok? n.key : null; };
+EX.schedulerBlock = function(c, compact){
+  const can = EX.canEditScheduler(c); const url = c.schedulerUrl; const sm = compact? 'ex-btn-sm' : '';
+  const editBtn = can? `<button type="button" data-sched-edit="${c.id}" onclick="EX.schedulerModal('${c.id}')" class="ex-btn ex-btn-ghost ${sm}">${EX.icon('edit','w-3.5 h-3.5')} ${url?'Change link':'Add scheduler link'}</button>` : '';
+  if(url) return `<span class="inline-flex flex-wrap items-center gap-2"><a href="${EX.esc(url)}" target="_blank" rel="noopener noreferrer" data-sched-open="${c.id}" title="Opens ${EX.esc(EX.hostOf(url))} in a new tab" class="ex-btn ex-btn-primary ${sm}">${EX.icon('external','w-3.5 h-3.5')} Scheduler Link</a>${editBtn}</span>`;
+  return `<span class="inline-flex flex-wrap items-center gap-2"><span data-sched-missing="${c.id}" class="ex-pill ex-pill-warn">${EX.icon('alert','w-3 h-3')} Scheduler link not added yet</span>${editBtn}</span>`;
+};
+EX.schedulerModal = function(cid){
+  const c = EX.byId('clients', cid); if(!c) return;
+  if(!EX.canEditScheduler(c)){ EX.toast('Only the Super Admin / MD, Operations Head / CEO and this client\'s own Digital Marketing Executive can change the scheduler link.','bad'); return; }
+  EX.openModal(`${EX.modalHeader('Scheduler link — '+EX.esc(c.companyName), 'Paste the address of this client\'s scheduling platform. Every client needs its own, different link.')}
+    <form onsubmit="EX.saveScheduler(event,'${cid}')" class="p-5 space-y-3">
+      <div><label class="ex-label" for="schedUrl">Scheduler URL *</label><input id="schedUrl" name="url" class="ex-input" placeholder="https://…" value="${EX.esc(c.schedulerUrl||'')}" autocomplete="off"/>
+        <div id="schedErr" role="alert" class="text-xs mt-1" style="color:var(--ex-bad)"></div></div>
+      <div class="flex flex-wrap justify-between gap-2 pt-1">${c.schedulerUrl?`<button type="button" onclick="EX.removeScheduler('${cid}')" class="ex-btn ex-btn-ghost" style="color:var(--ex-bad)">Remove link</button>`:'<span></span>'}
+        <span class="flex gap-2"><button type="button" class="ex-btn ex-btn-ghost" onclick="EX.closeModal()">Cancel</button><button class="ex-btn ex-btn-primary" id="schedSave">Save</button></span></div>
+    </form>`);
+};
+EX.saveScheduler = async function(ev, cid){
+  ev.preventDefault();
+  const c = EX.byId('clients', cid); if(!c) return;
+  const err = (m)=>{ const el = document.getElementById('schedErr'); if(el) el.textContent = m; };
+  if(!EX.canEditScheduler(c)){ err('You do not have permission to change this link.'); return; }
+  const n = EX.normalizeUrl(new FormData(ev.target).get('url'));
+  if(!n.ok){ err(n.error); return; }
+  const clash = EX.get('clients').find(o=>o.id!==cid && EX.schedulerKeyOf(o)===n.key);
+  if(clash){ err(`This link is already used by ${clash.companyName}. Every client needs its own scheduler link.`); return; }
+  const before = c.schedulerUrl || null;
+  const btn = document.getElementById('schedSave'); if(btn){ btn.disabled = true; btn.textContent = 'Saving…'; }
+  try{ await EX.patch('clients', cid, {schedulerUrl:n.url, schedulerUpdatedAt:EX.now(), schedulerUpdatedBy:(EX.currentEmployee()||{}).name||''}); }
+  catch(e){ if(btn){ btn.disabled = false; btn.textContent = 'Save'; } err('Could not save — please check your connection and try again.'); return; }
+  await EX.addAudit(before?'Changed scheduler link':'Added scheduler link','clients',cid,{schedulerUrl:before},{schedulerUrl:n.url});
+  EX.closeModal(); EX.toast('Scheduler link saved','good');
+};
+EX.removeScheduler = function(cid){
+  const c = EX.byId('clients', cid); if(!c || !EX.canEditScheduler(c)) return;
+  EX.confirmAction('Remove scheduler link?', `${EX.esc(c.companyName)} will show “Scheduler link not added yet” until a new link is added.`, async ()=>{
+    const before = c.schedulerUrl || null;
+    try{ await EX.patch('clients', cid, {schedulerUrl:null, schedulerUpdatedAt:EX.now(), schedulerUpdatedBy:(EX.currentEmployee()||{}).name||''}); }catch(e){ return; }
+    await EX.addAudit('Removed scheduler link','clients',cid,{schedulerUrl:before},{schedulerUrl:null});
+    EX.toast('Scheduler link removed','good');
+  }, true);
+};
+
+/* ---- client assets ---- */
+EX.ASSET_CATEGORIES = ['Branding','Creatives','Videos','Documents','Websites','Other'];
+EX.ASSET_HINTS = 'Google Drive folders and files, brand guidelines, logos, fonts, brand colours, photos, videos and raw footage, approved designs, creative references, content briefs, campaign documents, website and landing-page links';
+// Add / edit / delete: leadership, DMEs and the creative team. Everyone else with access to the client can open the links.
+EX.ASSET_MANAGE_ROLES = ['super_admin','ops_head','creative_head','dme','graphic_designer','video_editor','videographer'];
+// Assets marked "Restricted" are shown only to these roles.
+EX.ASSET_RESTRICTED_ROLES = ['super_admin','ops_head','creative_head','dme'];
+EX.canViewClientAssets = function(c){
+  if(!c || EX.session.mode!=='staff') return false;
+  const e = EX.currentEmployee(); if(!e || e.status==='Removed') return false;
+  if(EX.can('clients') || EX.currentRole()==='creative_head') return true;
+  return EX.get('content').some(x=>x.clientId===c.id && x.assignedTo===e.id) || EX.get('tasks').some(t=>t.clientId===c.id && t.assignedTo===e.id);
+};
+EX.canManageAssets = (c)=> EX.canViewClientAssets(c) && EX.ASSET_MANAGE_ROLES.includes(EX.currentRole());
+EX.canSeeRestrictedAssets = ()=> EX.ASSET_RESTRICTED_ROLES.includes(EX.currentRole());
+EX.clientAssetList = function(cid){
+  const seeAll = EX.canSeeRestrictedAssets();
+  return EX.get('config').filter(d=>d.kind==='clientAsset' && d.clientId===cid && (!d.restricted || seeAll))
+    .sort((a,b)=> (EX.ASSET_CATEGORIES.indexOf(a.category)-EX.ASSET_CATEGORIES.indexOf(b.category)) || String(a.name||'').localeCompare(String(b.name||'')));
+};
+EX.assetBodyHtml = function(c){
+  if(!(EX._loaded && EX._loaded.config)) return `<div class="ex-card p-6 text-sm" data-assets-loading style="color:var(--ex-ink-soft)">Loading assets…</div>`;
+  const all = EX.clientAssetList(c.id); const cat = EX.ui.assetCat||''; const q = (EX.ui.assetQ||'').trim().toLowerCase();
+  const manage = EX.canManageAssets(c);
+  const shown = all.filter(a=> (!cat || a.category===cat) && (!q || `${a.name} ${a.description||''} ${a.url||''}`.toLowerCase().includes(q)));
+  const chip = (val, label, n)=> `<button type="button" data-asset-cat="${val}" onclick="EX.assetSetCat('${val}')" class="ex-btn ex-btn-sm ${cat===val?'ex-btn-primary':'ex-btn-ghost'}">${label} <span class="tnum">${n}</span></button>`;
+  const chips = `<div class="flex flex-wrap gap-1.5 mb-3">${chip('', 'All', all.length)}${EX.ASSET_CATEGORIES.map(k=>chip(k, k, all.filter(a=>a.category===k).length)).join('')}</div>`;
+  let list;
+  if(!all.length) list = `<div class="ex-card">${EX.empty('No assets added yet', manage? 'Use “Add asset” to save the Google Drive folder, brand guidelines, logos, fonts and other links for this client.' : 'The Digital Marketing Executive or Creative Head can add the client’s links here.')}</div>`;
+  else if(!shown.length) list = `<div class="ex-card">${EX.empty('No assets match', 'Try another category or search word.')}</div>`;
+  else list = `<div class="ex-card divide-y" style="border-color:var(--ex-line)">${shown.map(a=>`
+    <div class="p-3 flex flex-wrap items-start justify-between gap-3" data-asset="${a.id}">
+      <div class="min-w-0 flex-1" style="min-width:210px">
+        <a href="${EX.esc(a.url)}" target="_blank" rel="noopener noreferrer" data-asset-open="${a.id}" class="font-medium text-sm break-words inline-flex items-center gap-1" style="color:var(--ex-blue-600)">${EX.esc(a.name)} ${EX.icon('external','w-3 h-3')}</a>
+        <div class="text-[11px] break-all" style="color:var(--ex-ink-soft)">${EX.esc(EX.hostOf(a.url))}</div>
+        ${a.description?`<div class="text-xs mt-1 break-words">${EX.esc(a.description)}</div>`:''}
+      </div>
+      <div class="flex flex-wrap items-center gap-2">
+        <span class="ex-pill ex-pill-neutral">${EX.esc(a.category||'Other')}</span>${a.restricted?'<span class="ex-pill ex-pill-warn" title="Only leadership, DMEs and the Creative Head can see this">Restricted</span>':''}
+        <span class="text-[11px]" style="color:var(--ex-ink-soft)">Updated ${EX.fmtDate(a._updatedAt||a._createdAt)}</span>
+        ${manage?`<button type="button" title="Edit asset" data-asset-edit="${a.id}" onclick="EX.assetModal('${c.id}','${a.id}')" class="ex-btn ex-btn-ghost ex-btn-sm !p-1.5">${EX.icon('edit','w-4 h-4')}</button><button type="button" title="Delete asset" data-asset-del="${a.id}" onclick="EX.assetDelete('${c.id}','${a.id}')" class="ex-btn ex-btn-ghost ex-btn-sm !p-1.5" style="color:var(--ex-bad)">${EX.icon('trash','w-4 h-4')}</button>`:''}
+      </div>
+    </div>`).join('')}</div>`;
+  const filtered = (cat||q) && all.length? `<div class="text-xs mb-2" style="color:var(--ex-ink-soft)">Showing ${shown.length} of ${all.length} · <button type="button" class="underline" onclick="EX.assetClearFilters()">clear filters</button></div>` : '';
+  return chips + filtered + list;
+};
+EX.assetsPanel = function(c, inModal){
+  const manage = EX.canManageAssets(c);
+  return `<div id="assetsPanel" data-client="${c.id}" ${inModal?'data-modal="1"':''}>
+    <div class="flex flex-wrap items-center gap-2 mb-3">
+      <input id="assetSearch" type="search" placeholder="Search this client’s assets…" value="${EX.esc(EX.ui.assetQ||'')}" oninput="EX.ui.assetQ=this.value;EX.assetsRerender()" class="ex-input flex-1" style="min-width:180px"/>
+      ${manage?`<button type="button" id="assetAddBtn" onclick="EX.assetModal('${c.id}')" class="ex-btn ex-btn-primary">${EX.icon('plus','w-4 h-4')} Add asset</button>`:''}
+    </div>
+    <div class="rounded-xl p-3 mb-3 text-xs" style="background:var(--ex-blue-50)">Save <b>links</b> here: ${EX.ASSET_HINTS}. Links open in a new tab. <b>Never save passwords or logins here</b> — those belong in the encrypted <i>Credentials</i> tab.</div>
+    <div id="assetsBody">${EX.assetBodyHtml(c)}</div>
+  </div>`;
+};
+EX.assetsRerender = function(){
+  const root = document.getElementById('assetsPanel'); if(!root) return;
+  const c = EX.byId('clients', root.dataset.client); const body = document.getElementById('assetsBody');
+  if(c && body) body.innerHTML = EX.assetBodyHtml(c);
+};
+EX.assetSetCat = function(v){ EX.ui.assetCat = v; EX.assetsRerender(); };
+EX.assetClearFilters = function(){ EX.ui.assetCat = ''; EX.ui.assetQ = ''; const s = document.getElementById('assetSearch'); if(s) s.value = ''; EX.assetsRerender(); };
+EX.clientAssetsTab = function(c){
+  if(!EX.canViewClientAssets(c)) return `<div class="ex-card">${EX.empty('You do not have access to this client’s assets')}</div>`;
+  return EX.assetsPanel(c, false);
+};
+EX.openAssetsModal = function(cid){
+  const c = EX.byId('clients', cid); if(!c) return;
+  if(!EX.canViewClientAssets(c)){ EX.toast('You do not have access to this client’s assets.','bad'); return; }
+  EX.openModal(`${EX.modalHeader('Client assets — '+EX.esc(c.companyName))}<div class="p-5 max-h-[75vh] overflow-y-auto">${EX.assetsPanel(c, true)}</div>`, {wide:true});
+};
+EX.assetInModal = ()=> { const p = document.getElementById('assetsPanel'); return !!(p && p.dataset.modal); };
+EX.assetModal = function(cid, assetId){
+  const c = EX.byId('clients', cid); if(!c) return;
+  if(!EX.canManageAssets(c)){ EX.toast('You do not have permission to add or change assets for this client.','bad'); return; }
+  const a = assetId? EX.byId('config', assetId) : null;
+  if(assetId && (!a || a.kind!=='clientAsset')) return;
+  const fromModal = EX.assetInModal();
+  const fields = [
+    {key:'name', label:'Asset name', required:true, full:true, placeholder:'e.g. Brand guidelines 2026'},
+    {key:'url', label:'Link', required:true, full:true, placeholder:'https://drive.google.com/…'},
+    {key:'category', label:'Category', type:'select', options:EX.ASSET_CATEGORIES},
+    {key:'description', label:'Description (optional)', type:'textarea', full:true, rows:2},
+  ];
+  if(EX.canSeeRestrictedAssets()) fields.push({key:'restricted', label:'Restricted — only leadership, DMEs and the Creative Head can see this', type:'checkbox', full:true});
+  EX.openModal(`${EX.modalHeader(a?'Edit asset':'Add asset', EX.esc(c.companyName))}
+    <form onsubmit="EX.saveAsset(event,'${cid}'${a?`,'${assetId}'`:''},${fromModal})" class="p-5">${EX.formGrid(fields, a||{category:'Branding'}, 2)}
+    <div id="assetErr" role="alert" class="text-xs mt-2" style="color:var(--ex-bad)"></div>
+    <div class="flex justify-end gap-2 pt-3 mt-2 border-t" style="border-color:var(--ex-line)"><button type="button" class="ex-btn ex-btn-ghost" onclick="EX.assetAfter('${cid}',${fromModal})">Cancel</button><button class="ex-btn ex-btn-primary" id="assetSave">Save</button></div></form>`, {wide:true});
+};
+EX.assetAfter = function(cid, fromModal){ if(fromModal) EX.openAssetsModal(cid); else EX.closeModal(); };
+EX.saveAsset = async function(ev, cid, assetId, fromModal){
+  ev.preventDefault();
+  if(typeof assetId === 'boolean'){ fromModal = assetId; assetId = null; }
+  const c = EX.byId('clients', cid); if(!c) return;
+  const err = (m)=>{ const el = document.getElementById('assetErr'); if(el) el.textContent = m; };
+  if(!EX.canManageAssets(c)){ err('You do not have permission to change assets for this client.'); return; }
+  const f = new FormData(ev.target);
+  const name = String(f.get('name')||'').trim(); const n = EX.normalizeUrl(f.get('url'));
+  if(!name){ err('Please give the asset a name.'); return; }
+  if(!n.ok){ err(n.error); return; }
+  const category = EX.ASSET_CATEGORIES.includes(f.get('category'))? f.get('category') : 'Other';
+  const description = String(f.get('description')||'').trim().slice(0,600);
+  const prev = assetId? EX.byId('config', assetId) : null;
+  const restricted = EX.canSeeRestrictedAssets()? !!ev.target.querySelector('[name=restricted]').checked : !!(prev && prev.restricted);
+  const btn = document.getElementById('assetSave'); if(btn){ btn.disabled = true; btn.textContent = 'Saving…'; }
+  const me = EX.currentEmployee() || {};
+  try{
+    if(assetId){
+      await EX.patch('config', assetId, {name, url:n.url, category, description, restricted, updatedByName:me.name||''});
+      await EX.addAudit('Edited client asset','clients',cid,{name:prev.name,url:prev.url},{name,url:n.url});
+    }else{
+      const id = `asset_${cid}_${Date.now().toString(36)}${Math.random().toString(36).slice(2,6)}`;
+      await EX.setId('config', id, {kind:'clientAsset', clientId:cid, name, url:n.url, category, description, restricted, _createdAt:EX.now(), _createdBy:me.id||'', _createdByName:me.name||'', updatedByName:me.name||''});
+      await EX.addAudit('Added client asset','clients',cid,null,{name,url:n.url,category});
+    }
+  }catch(e){ if(btn){ btn.disabled = false; btn.textContent = 'Save'; } err('Could not save — please check your connection and try again.'); return; }
+  EX.toast(assetId? 'Asset updated' : 'Asset added','good');
+  EX.assetAfter(cid, fromModal); EX.assetsRerender();
+};
+EX.assetDelete = function(cid, assetId){
+  const c = EX.byId('clients', cid); const a = EX.byId('config', assetId); if(!c || !a || !EX.canManageAssets(c)) return;
+  const fromModal = EX.assetInModal();
+  EX.confirmAction('Delete this asset?', `<b>${EX.esc(a.name)}</b> will be removed from ${EX.esc(c.companyName)}’s assets. The file itself (in Drive, etc.) is not touched.`, async ()=>{
+    try{ await EX.remove('config', assetId); }catch(e){ return; }
+    await EX.addAudit('Deleted client asset','clients',cid,{name:a.name,url:a.url},null);
+    EX.toast('Asset deleted','good');
+    if(fromModal) EX.openAssetsModal(cid);
+  }, true);
+};
+
+/* ---- the "Client Studio" strip on the Content Studio page: every client the person works with, scheduler + assets in one place ---- */
+EX.studioClients = ()=> EX.get('clients').filter(c=>c.status!=='Churned' && EX.canViewClientAssets(c)).sort((a,b)=>(a.companyName||'').localeCompare(b.companyName||''));
+EX.clientStudioPanel = function(){
+  const list = EX.studioClients(); if(!list.length) return '';
+  const open = EX.ui.studioOpen!==false; const LIMIT = 8; const shown = EX.ui.studioAll? list : list.slice(0, LIMIT);
+  const loaded = !!(EX._loaded && EX._loaded.config);
+  return `<div class="ex-card mb-5" id="clientStudioPanel">
+    <button type="button" class="w-full flex items-center justify-between gap-2 p-3 text-left" onclick="EX.ui.studioOpen=${open?'false':'true'};EX.scheduleRender()"><span class="font-display font-bold text-sm">Client Studio <span class="font-normal text-xs" style="color:var(--ex-ink-soft)">— scheduler link and assets for each of your ${list.length} client${list.length===1?'':'s'}</span></span><span class="text-xs" style="color:var(--ex-blue-600)">${open?'Hide':'Show'}</span></button>
+    ${open?`<div class="divide-y border-t" style="border-color:var(--ex-line)">${shown.map(c=>`
+      <div class="p-3 flex flex-wrap items-center justify-between gap-2" data-studio-client="${c.id}">
+        <div class="flex items-center gap-2 min-w-0">${EX.avatar(c.companyName,26)}<div class="font-medium text-sm truncate">${EX.esc(c.companyName)}</div></div>
+        <div class="flex flex-wrap items-center gap-2">${EX.schedulerBlock(c, true)}<button type="button" data-studio-assets="${c.id}" onclick="EX.openAssetsModal('${c.id}')" class="ex-btn ex-btn-ghost ex-btn-sm">${EX.icon('layers','w-3.5 h-3.5')} Assets${loaded?` (${EX.clientAssetList(c.id).length})`:''}</button></div>
+      </div>`).join('')}
+      ${list.length>LIMIT?`<div class="p-2 text-center"><button type="button" class="text-xs underline" onclick="EX.ui.studioAll=${EX.ui.studioAll?'false':'true'};EX.scheduleRender()">${EX.ui.studioAll?'Show fewer':'Show all '+list.length+' clients'}</button></div>`:''}
+    </div>`:''}
+  </div>`;
+};
+
+/* ================= SMART NOTIFICATIONS & REMINDERS ================= */
+// Reminders (deadlines, overdue, pending work, meetings, content/publishing dates) are generated by whichever team member has the system open.
+// Each reminder has a fixed id (event + person + stage), so the database itself refuses a second copy: nobody is told twice about the same thing,
+// no matter how many people have the app open. Everything is stored in the "notifications" table, so it survives a page refresh.
+EX.NOTIF_KINDS = {
+  deadline:{label:'Deadline', tone:'warn'}, overdue:{label:'Overdue', tone:'bad'}, pending:{label:'Pending', tone:'info'}, meeting:{label:'Meeting', tone:'info'},
+  content:{label:'Content', tone:'warn'}, assignment:{label:'Assigned', tone:'info'}, update:{label:'Update', tone:'neutral'}, approval:{label:'Approval', tone:'good'},
+};
+EX.endOfDayOf = (ts)=>{ const [y,m,d] = EX.utcDayKey(ts).split('-').map(Number); return new Date(y, m-1, d, 23, 59, 59, 999).getTime(); };
+EX.dueAt = (t)=> t && t.deadline? EX.endOfDayOf(t.deadline) : null;
+EX.reminderHours = function(){
+  const raw = (EX.data.companyConfig||{}).reminderHours;
+  const arr = (Array.isArray(raw)? raw : String(raw||'').split(/[\s,]+/)).map(Number).filter(n=>n>0 && n<=720);
+  return arr.length? Array.from(new Set(arr)).sort((a,b)=>b-a) : [24,1];
+};
+EX.pendingTime = function(){ const t = (EX.data.companyConfig||{}).pendingTime; return /^\d{2}:\d{2}$/.test(t||'')? t : '10:00'; };
+// the closest reminder point that has already been reached (e.g. at 3 hours before: the "24 h" one) - so a late opening never sends a pile of old stages
+EX.reminderStage = function(due, now){
+  let pick = null;
+  for(const h of EX.reminderHours()){ if(now >= due - h*3600000 && (pick===null || h<pick)) pick = h; }
+  return pick;
+};
+EX.humanLeft = function(ms){
+  const m = Math.round(ms/60000); if(m<60) return `${Math.max(m,1)} minute${m===1?'':'s'}`;
+  const h = Math.round(ms/3600000); if(h<24) return `${h} hour${h===1?'':'s'}`;
+  const d = Math.round(ms/86400000); return `${d} day${d===1?'':'s'}`;
+};
+EX._notifSeen = {};
+EX.notifyOnce = async function(key, payload){
+  const id = 'n_'+String(key).replace(/[^A-Za-z0-9_:-]/g,'_').slice(0,200);
+  if(EX._notifSeen[id]) return false;
+  EX._notifSeen[id] = 1;
+  const body = Object.assign({read:false, key}, payload, {_createdAt:EX.now(), _updatedAt:EX.now()});
+  try{
+    const { error } = await EX.sb.from('notifications').upsert({id, data:body}, {onConflict:'id', ignoreDuplicates:true});
+    if(error){ delete EX._notifSeen[id]; return false; }
+    const list = EX.data.notifications; if(Array.isArray(list) && !list.find(d=>d.id===id)) list.push(Object.assign({id}, body));
+    return true;
+  }catch(e){ delete EX._notifSeen[id]; return false; }
+};
+EX.NOTIF_MAX_PER_SCAN = 120;
+EX._notifBusy = false;
+EX.notifScan = async function(){
+  if(EX._notifBusy) return 0;
+  if(EX.session.mode!=='staff' || !EX.session.employeeId || !EX.sb) return 0;
+  EX._notifBusy = true; try{ await EX.reloadCompanyConfig(); }catch(e){} EX._notifBusy = false;   // reminder hours / digest time must be the saved ones
+  const L = EX._loaded||{}; if(!EX._cfgReady || !(L.tasks && L.employees && L.notifications && L.clients && L.content && L.meetings)) return 0;
+  EX._notifBusy = true; let made = 0;
+  try{
+    const now = EX.now();
+    const have = new Set(EX.get('notifications').map(n=>n.id));
+    const emps = EX.get('employees').filter(e=>e.status==='Active');
+    const empById = {}; emps.forEach(e=>{ empById[e.id] = e; });
+    const ops = emps.filter(e=>EX.effRole(e.role)==='ops_head');
+    const client = (id)=> (EX.byId('clients', id)||{}).companyName || '';
+    const queue = [];
+    const q = (key, payload)=>{ const id = 'n_'+String(key).replace(/[^A-Za-z0-9_:-]/g,'_').slice(0,200); if(!have.has(id)) queue.push([key, payload]); };
+    const tasks = EX.get('tasks');
+    // 1 + 2: task deadlines and overdue work
+    for(const t of tasks){
+      if(t.status==='Done' || !t.deadline) continue;
+      const due = EX.dueAt(t); const dk = EX.utcDayKey(t.deadline); const asg = empById[t.assignedTo]; const cn = client(t.clientId);
+      const base = {entity:'task', entityId:t.id, clientId:t.clientId||'', clientName:cn, dueAt:due, link:'tasks'};
+      if(now < due){
+        const h = EX.reminderStage(due, now); if(h===null || !asg) continue;
+        q(`rem:task:${t.id}:${dk}:${h}:${asg.id}`, Object.assign({kind:'deadline', targetEmployeeId:asg.id, message:`Reminder: "${t.title}"${cn?' ('+cn+')':''} is due in ${EX.humanLeft(due-now)}.`}, base));
+      }else if(now - due <= 7*86400000){
+        if(asg) q(`over:task:${t.id}:${dk}:${asg.id}`, Object.assign({kind:'overdue', targetEmployeeId:asg.id, message:`Overdue: "${t.title}"${cn?' ('+cn+')':''} was due on ${EX.fmtDate(t.deadline)}.`}, base));
+        ops.forEach(o=>{ if(asg && o.id===asg.id) return;
+          q(`over:task:${t.id}:${dk}:${o.id}`, Object.assign({kind:'overdue', targetEmployeeId:o.id, message:`Overdue: "${t.title}"${cn?' ('+cn+')':''} — ${asg? asg.name : 'unassigned'} missed the ${EX.fmtDate(t.deadline)} deadline.`}, base)); });
+      }
+    }
+    // 3: daily reminder about work that is still open
+    const nd = new Date(now); const [ph, pm] = EX.pendingTime().split(':').map(Number);
+    if(nd.getHours()*60+nd.getMinutes() >= ph*60+pm && !EX.isWeeklyOff(nd)){
+      const day = EX.todayKey(nd);
+      emps.forEach(e=>{
+        const open = tasks.filter(t=>t.assignedTo===e.id && t.status!=='Done'); if(!open.length) return;
+        const over = open.filter(t=>EX.taskOverdue(t)).length;
+        const names = open.slice().sort((a,b)=>(a.deadline||9e15)-(b.deadline||9e15)).slice(0,3).map(t=>`"${t.title}"`).join(', ');
+        q(`pend:${e.id}:${day}`, {kind:'pending', targetEmployeeId:e.id, link:'tasks', dueAt:null, message:`You have ${open.length} pending task${open.length===1?'':'s'}${over?` (${over} overdue)`:''}: ${names}${open.length>3?' …':''}`});
+      });
+    }
+    // 4: client meetings
+    for(const m of EX.get('meetings')){
+      if(m.status!=='Scheduled' || !m.date || m.date<=now) continue;
+      const h = EX.reminderStage(m.date, now); if(h===null) continue;
+      const c = EX.byId('clients', m.clientId); const cn = c? c.companyName : 'a client';
+      const who = new Set([c && c.assignedDme, m._createdBy].concat(ops.map(o=>o.id)).filter(id=>id && empById[id]));
+      who.forEach(rid=> q(`rem:meet:${m.id}:${m.date}:${h}:${rid}`, {kind:'meeting', targetEmployeeId:rid, entity:'meeting', entityId:m.id, clientId:m.clientId||'', clientName:cn, dueAt:m.date, link:'clients',
+        message:`Client meeting with ${cn} in ${EX.humanLeft(m.date-now)} — ${EX.fmtDateTime(m.date)}.`}));
+    }
+    // 5: scheduled posts / reels / videos approaching their publishing (or content deadline) date
+    for(const x of EX.get('content')){
+      if(['Published','Rejected'].includes(x.status)) continue;
+      const hasPub = !!x.publishDate; const ts = x.publishDate || x.deadline; if(!ts) continue;
+      const due = EX.endOfDayOf(ts); if(now >= due) continue;
+      const h = EX.reminderStage(due, now); if(h===null) continue;
+      const c = EX.byId('clients', x.clientId); const cn = c? c.companyName : '';
+      const linked = tasks.some(t=>t.contentId===x.id);
+      const who = new Set([ (hasPub || !linked) ? x.assignedTo : null, c && c.assignedDme ].filter(id=>id && empById[id]));
+      who.forEach(rid=> q(`rem:content:${x.id}:${hasPub?'p':'d'}${EX.utcDayKey(ts)}:${h}:${rid}`, {kind:'content', targetEmployeeId:rid, entity:'content', entityId:x.id, clientId:x.clientId||'', clientName:cn, dueAt:due, link:'content',
+        message: hasPub? `Publishing soon: "${x.title}" (${x.type||'content'}${cn?' · '+cn:''}) goes out in ${EX.humanLeft(due-now)}.` : `Content deadline: "${x.title}" (${x.type||'content'}${cn?' · '+cn:''}) is due in ${EX.humanLeft(due-now)}.`}));
+    }
+    for(const [key, payload] of queue){ if(made >= EX.NOTIF_MAX_PER_SCAN) break; if(await EX.notifyOnce(key, payload)) made++; }
+    if(made){ try{ if(EX._reload && EX._reload.notifications) await EX._reload.notifications(); }catch(e){} EX.scheduleRender(); }
+  }catch(e){ console.warn('notification scan', e); }
+  finally{ EX._notifBusy = false; }
+  return made;
+};
+setInterval(()=>{ try{ EX.notifScan(); }catch(e){} }, 60000);
+setTimeout(()=>{ try{ EX.notifScan(); }catch(e){} }, 8000);
+
+/* ---- event notifications: assignments, updates, approvals (a person is never notified about their own action) ---- */
+EX.notifyAs = function(targetId, payload){
+  if(!targetId || targetId===EX.session.employeeId) return Promise.resolve(null);
+  const e = EX.byId('employees', targetId); if(e && e.status==='Removed') return Promise.resolve(null);
+  return EX.addNotification(Object.assign({targetEmployeeId:targetId}, payload));
+};
+EX.taskNotifBase = (t)=> ({entity:'task', entityId:t.id, clientId:t.clientId||'', clientName:(EX.byId('clients',t.clientId)||{}).companyName||'', dueAt:EX.dueAt(t), link:'tasks'});
+EX.actorName = ()=> (EX.currentEmployee()||{}).name || 'Someone';
+EX.TASK_EDIT_FIELDS = [['title','title'],['assignedTo','assignee'],['deadline','deadline'],['priority','priority'],['clientId','client'],['type','type'],['description','description'],['estimatedHours','estimated hours']];
+EX.taskChanges = function(before, data){
+  return EX.TASK_EDIT_FIELDS.filter(([k])=> (before[k]||'') !== (data[k]||'')).map(([,label])=>label);
+};
+EX.notifyTaskAssigned = function(t){
+  const b = EX.taskNotifBase(t);
+  return EX.notifyAs(t.assignedTo, Object.assign({kind:'assignment', message:`New task assigned: ${t.title}${b.clientName?' ('+b.clientName+')':''}${t.deadline?' — due '+EX.fmtDate(t.deadline):''}`}, b));
+};
+EX.notifyTaskEdited = async function(before, t, changed){
+  const b = EX.taskNotifBase(t);
+  if(changed.includes('assignee')){
+    await EX.notifyAs(t.assignedTo, Object.assign({kind:'assignment', message:`New task assigned: ${t.title}${b.clientName?' ('+b.clientName+')':''}${t.deadline?' — due '+EX.fmtDate(t.deadline):''}`}, b));
+    if(before.assignedTo && before.assignedTo!==t.assignedTo) await EX.notifyAs(before.assignedTo, Object.assign({kind:'update', message:`Task reassigned: "${t.title}" is no longer assigned to you.`}, b));
+  }else{
+    await EX.notifyAs(t.assignedTo, Object.assign({kind:'update', message:`Task updated: "${t.title}" — ${changed.join(', ')} changed by ${EX.actorName()}${changed.includes('deadline')&&t.deadline?' (now due '+EX.fmtDate(t.deadline)+')':''}.`}, b));
+  }
+};
+EX.notifyTaskStatus = async function(t, from, to){
+  const me = EX.currentEmployee(); if(!me) return;
+  const b = EX.taskNotifBase(t);
+  if(t.assignedTo && t.assignedTo!==me.id){
+    const msg = to==='Revision'? `Sent for revision: "${t.title}" — ${me.name} asked for changes.`
+      : to==='Done'? `Approved: "${t.title}" was marked Done by ${me.name}.`
+      : `Status update: "${t.title}" moved from ${from} to ${to} by ${me.name}.`;
+    await EX.notifyAs(t.assignedTo, Object.assign({kind: (to==='Revision'||to==='Done')? 'approval':'update', message:msg}, b));
+  }
+  if(t.assignedTo===me.id && t._createdBy && t._createdBy!==me.id && (to==='Review'||to==='Done')){
+    await EX.notifyAs(t._createdBy, Object.assign({kind:'update', message: to==='Done'? `Completed: ${me.name} finished "${t.title}".` : `Ready for review: ${me.name} sent "${t.title}" for review.`}, b));
+  }
+};
+EX.notifyContentOutcome = async function(x, outcome){
+  const c = EX.byId('clients', x.clientId); const cn = c? c.companyName : '';
+  const who = Array.from(new Set([x.assignedTo, c && c.assignedDme].filter(Boolean)));
+  const msg = outcome==='approved'? `Approved: "${x.title}"${cn?' ('+cn+')':''} was approved.`
+    : outcome==='rejected'? `Rejected: "${x.title}"${cn?' ('+cn+')':''} was rejected.`
+    : `Sent for revision: "${x.title}"${cn?' ('+cn+')':''} needs changes.`;
+  for(const id of who) await EX.notifyAs(id, {kind:'approval', message:msg+` (${EX.actorName()})`, entity:'content', entityId:x.id, clientId:x.clientId||'', clientName:cn, dueAt:x.deadline? EX.endOfDayOf(x.deadline) : null, link:'content'});
+};
+
+/* ---- notification centre ---- */
+EX.notifRead = (n)=> !!(n.read || (n.readBy||[]).includes(EX.session.employeeId));
+EX.unreadCount = ()=> EX.myNotifications().filter(n=>!EX.notifRead(n)).length;
+EX.markNotifRead = async function(id){
+  const n = EX.byId('notifications', id); if(!n || EX.notifRead(n)) return;
+  try{
+    if(n.targetEmployeeId) await EX.patch('notifications', id, {read:true});
+    else await EX.patch('notifications', id, {readBy:(n.readBy||[]).concat(EX.session.employeeId)});
+  }catch(e){}
+};
+EX.markAllNotifsRead = async function(){
+  const unread = EX.myNotifications().filter(n=>!EX.notifRead(n));
+  if(!unread.length) return;
+  try{ for(const n of unread) await EX.markNotifRead(n.id); }catch(e){ return; }
+  EX.toast(`Marked ${unread.length} notification${unread.length===1?'':'s'} as read`,'good');
+};
+EX.openNotification = async function(id){
+  const n = EX.byId('notifications', id); if(!n) return;
+  EX.markNotifRead(id);
+  const ent = n.entityId;
+  if(n.entity==='task' && ent && EX.byId('tasks', ent)){ EX.route('tasks'); setTimeout(()=>EX.openTaskDrawer(ent), 200); return; }
+  if(n.entity==='content' && ent && EX.byId('content', ent) && EX.can('content')){ EX.route('content'); setTimeout(()=>EX.openContentDrawer(ent), 200); return; }
+  if(n.entity==='meeting' && n.clientId && EX.can('clients')){ EX.ui.clientTab = 'meetings'; EX.route('clients', n.clientId); return; }
+  EX.route(EX.can(n.link||'dashboard')? (n.link||'dashboard') : 'dashboard');
+};
+EX.nfSet = function(k, v){ EX.ui[k] = v; EX.scheduleRender(); };
+EX.desktopAlertsSupported = ()=> typeof window.Notification !== 'undefined';
+EX.desktopAlertsOn = function(){ try{ return EX.desktopAlertsSupported() && localStorage.getItem('ex_desktop_alerts')==='1' && Notification.permission==='granted'; }catch(e){ return false; } };
+EX.toggleDesktopAlerts = async function(){
+  if(!EX.desktopAlertsSupported()){ EX.toast('This browser does not support desktop alerts.','bad'); return; }
+  if(EX.desktopAlertsOn()){ try{ localStorage.setItem('ex_desktop_alerts','0'); }catch(e){} EX.toast('Desktop alerts are off on this device','good'); EX.scheduleRender(); return; }
+  let p = Notification.permission; if(p==='default'){ try{ p = await Notification.requestPermission(); }catch(e){ p = 'denied'; } }
+  if(p==='granted'){ try{ localStorage.setItem('ex_desktop_alerts','1'); }catch(e){} EX.toast('Desktop alerts are on — you will get a pop-up while Engage X is open in a tab','good'); try{ new Notification('Engage X alerts are on', {body:'You will be alerted about deadlines, meetings and approvals.'}); }catch(e){} }
+  else EX.toast('Your browser blocked alerts. Allow notifications for this site in the browser settings, then try again.','bad');
+  EX.scheduleRender();
+};
+EX._alertSeen = null; EX._alertOwner = null;
+EX.checkDesktopAlerts = function(){
+  if(!EX.session.employeeId || !(EX._loaded && EX._loaded.notifications)) return;
+  if(EX._alertOwner!==EX.session.employeeId){ EX._alertOwner = EX.session.employeeId; EX._alertSeen = null; }
+  const mine = EX.myNotifications();
+  if(EX._alertSeen===null){ EX._alertSeen = new Set(mine.map(n=>n.id)); return; }
+  const fresh = mine.filter(n=>!EX._alertSeen.has(n.id)); fresh.forEach(n=>EX._alertSeen.add(n.id));
+  if(!fresh.length || !EX.desktopAlertsOn()) return;
+  fresh.filter(n=>!EX.notifRead(n)).slice(0,3).forEach(n=>{ try{ new Notification('Engage X', {body:n.message, tag:n.id}); }catch(e){} });
+};
+setInterval(()=>{ try{ EX.checkDesktopAlerts(); }catch(e){} }, 15000);
+EX.views['notifications'] = function(){
+  const all = EX.myNotifications(); const unread = all.filter(n=>!EX.notifRead(n)).length;
+  const kind = EX.ui.nfKind||''; const onlyUnread = !!EX.ui.nfUnread;
+  let list = all.filter(n=> (!kind || (n.kind||'general')===kind) && (!onlyUnread || !EX.notifRead(n)));
+  const total = list.length; const LIMIT = 150; list = list.slice(0, LIMIT);
+  const loaded = !!(EX._loaded && EX._loaded.notifications);
+  const row = (n)=>{
+    const k = EX.NOTIF_KINDS[n.kind] || {label:'General', tone:'neutral'}; const rd = EX.notifRead(n);
+    const meta = [n.clientName, n.dueAt? (n.kind==='meeting'? 'Meeting '+EX.fmtDateTime(n.dueAt) : (n.entity==='task'||n.entity==='content'? 'Due '+EX.fmtDate(n.dueAt) : '')) : ''].filter(Boolean).map(EX.esc).join(' · ');
+    return `<div role="button" tabindex="0" data-notif="${n.id}" data-kind="${n.kind||'general'}" data-read="${rd?1:0}" onclick="EX.openNotification('${n.id}')" onkeydown="if(event.key==='Enter')EX.openNotification('${n.id}')" class="flex items-start gap-3 p-3.5 cursor-pointer ${rd?'':'bg-[var(--ex-blue-50)]'} hover:bg-[var(--ex-blue-50)]">
+      <span class="w-2 h-2 rounded-full mt-1.5 shrink-0" style="background:${rd?'transparent':'var(--ex-blue-500)'}"></span>
+      <div class="flex-1 min-w-0"><div class="text-sm break-words">${EX.esc(n.message)}</div>
+        <div class="flex flex-wrap items-center gap-x-2 gap-y-1 mt-1"><span class="ex-pill ex-pill-${k.tone}">${k.label}</span>${meta?`<span class="text-xs" style="color:var(--ex-ink-soft)">${meta}</span>`:''}<span class="text-xs" style="color:var(--ex-ink-soft)">${EX.fmtDateTime(n._createdAt)}</span></div></div>
+      <span class="text-xs shrink-0 hidden sm:inline" style="color:var(--ex-blue-600)">Open ${EX.icon('arrow-right','w-3 h-3')}</span>
+    </div>`;
+  };
+  const kinds = Object.keys(EX.NOTIF_KINDS);
+  return `${EX.pageHead('Notifications', `${unread} unread · deadlines, overdue work, pending tasks, meetings, content dates and approvals.`, `
+      ${EX.desktopAlertsSupported()?`<button type="button" id="alertToggle" onclick="EX.toggleDesktopAlerts()" class="ex-btn ex-btn-ghost ex-btn-sm">${EX.icon('bell','w-3.5 h-3.5')} Desktop alerts: ${EX.desktopAlertsOn()?'On':'Off'}</button>`:''}
+      ${unread?`<button type="button" onclick="EX.markAllNotifsRead()" class="ex-btn ex-btn-ghost ex-btn-sm">Mark all read</button>`:''}`)}
+  <div class="flex flex-wrap items-center gap-2 mb-3">
+    <select id="nfKind" class="ex-select !w-auto" onchange="EX.nfSet('nfKind',this.value)"><option value="">All types</option>${kinds.map(k=>`<option value="${k}" ${kind===k?'selected':''}>${EX.NOTIF_KINDS[k].label}</option>`).join('')}<option value="general" ${kind==='general'?'selected':''}>General</option></select>
+    <label class="flex items-center gap-1.5 text-xs"><input type="checkbox" id="nfUnread" ${onlyUnread?'checked':''} onchange="EX.nfSet('nfUnread',this.checked)"/> Unread only</label>
+    <span class="text-xs" style="color:var(--ex-ink-soft)">${total} shown</span>
+  </div>
+  <div class="ex-card divide-y" id="notifList" style="border-color:var(--ex-line)">
+    ${!loaded? `<div class="p-6 text-sm" style="color:var(--ex-ink-soft)">Loading notifications…</div>` : (list.length? list.map(row).join('') : `<div class="p-6">${EX.empty(all.length? 'Nothing matches this filter' : 'You are all caught up', all.length? 'Change the type or untick “Unread only”.' : 'Deadline reminders, overdue alerts, meeting reminders and approvals will appear here.')}</div>`)}
+    ${total>LIMIT?`<div class="p-3 text-xs text-center" style="color:var(--ex-ink-soft)">Showing the latest ${LIMIT} of ${total}.</div>`:''}
+  </div>`;
+};
+
+/* ================= COMPLETED TASKS (hidden from the active lists, never deleted) ================= */
+// Setting (Company Settings): "immediate" (default) | "24h" | "7d". Only tasks whose status is Done are ever hidden;
+// To Do / In Progress / Review / Revision / Blocked always stay on the active board.
+EX.COMPLETED_HIDE_MODES = {immediate:'immediately', '24h':'after 24 hours', '7d':'after 7 days'};
+EX.completedHideMode = ()=>{ const m = (EX.data.companyConfig||{}).completedHide; return EX.COMPLETED_HIDE_MODES[m]? m : 'immediate'; };
+EX.archiveDelayMs = ()=> ({immediate:0, '24h':86400000, '7d':7*86400000})[EX.completedHideMode()];
+EX.archiveLabel = ()=> EX.COMPLETED_HIDE_MODES[EX.completedHideMode()];
+EX.TASK_HISTORY_MAX = 60;
+EX.taskHist = function(t, entry){
+  const me = EX.currentEmployee();
+  const e = Object.assign({at:EX.now(), by:me? me.id : '', byName:me? me.name : 'System'}, entry);
+  return ((t && t.history) || []).concat([e]).slice(-EX.TASK_HISTORY_MAX);
+};
+EX.canReopenTask = function(t){
+  const me = EX.session.employeeId; if(!me || !t || t.status!=='Done') return false;
+  return ['super_admin','ops_head','creative_head'].includes(EX.currentRole()) || t.assignedTo===me || t._createdBy===me;
+};
+EX.reopenTask = function(id){
+  const t = EX.byId('tasks', id); if(!t) return;
+  if(!EX.canReopenTask(t)){ EX.toast('Only the assigned person, the person who created the task, or a manager can reopen it.','bad'); return; }
+  EX.confirmAction('Reopen this task?', `<b>${EX.esc(t.title)}</b> goes back to <b>In Progress</b> for ${EX.esc(t.assignedToName||'its assignee')}. The original completion date (${EX.fmtDate(EX.taskDoneAt(t))}) stays in its history.`, async ()=>{
+    const cur = EX.byId('tasks', id); if(!cur || cur.status!=='Done') return;
+    try{
+      await EX.patch('tasks', id, {status:'In Progress', lastCompletedAt:EX.taskDoneAt(cur), reopenedAt:EX.now(), reopenCount:(cur.reopenCount||0)+1, history:EX.taskHist(cur, {action:'Reopened', from:'Done', to:'In Progress'})});
+    }catch(e){ return; }
+    await EX.addAudit('Reopened task','tasks',id,{status:'Done'},{status:'In Progress'});
+    const now = EX.byId('tasks', id);
+    if(now) await EX.notifyAs(now.assignedTo, Object.assign({kind:'update', message:`Task reopened: "${now.title}" was reopened by ${EX.actorName()}.`}, EX.taskNotifBase(now)));
+    EX.toast('Task reopened — it is back on the active list','good');
+  });
+};
+EX.deadlineCell = (t)=> `${EX.fmtDate(t.deadline)}${EX.taskOverdue(t)?' <span class="ex-pill ex-pill-bad">Overdue</span>':''}`;
+EX.taskDescriptionBlock = (t)=> t.description? `<div class="rounded-xl border p-3 mb-3 text-sm break-words" style="border-color:var(--ex-line)"><div class="ex-label">Description</div>${EX.esc(t.description).replace(/\n/g,'<br>')}</div>` : '';
+EX.taskReopenBlock = (t)=> EX.canReopenTask(t)? `<div class="mb-3"><button type="button" id="reopenTaskBtn" onclick="EX.closeModal();EX.reopenTask('${t.id}')" class="ex-btn ex-btn-ghost ex-btn-sm">${EX.icon('refresh','w-3.5 h-3.5')} Reopen task</button></div>` : '';
+EX.taskHistoryBlock = function(t){
+  const h = (t.history||[]).slice().reverse();
+  const first = `<div class="text-xs py-1">${EX.fmtDateTime(t._createdAt)} — Created by ${EX.esc(EX.taskCreatorLabel(t))}${t.assignedToName?', assigned to '+EX.esc(t.assignedToName):''}</div>`;
+  const rows = h.map(e=>`<div class="text-xs py-1 border-t" style="border-color:var(--ex-line-soft)">${EX.fmtDateTime(e.at)} — ${EX.esc(e.byName||'')}: ${EX.esc(e.action||'')}${e.from&&e.to?` ${EX.esc(e.from)} → ${EX.esc(e.to)}`:''}${e.note?` (${EX.esc(e.note)})`:''}</div>`).join('');
+  return `<details class="rounded-xl border p-3 mb-3" style="border-color:var(--ex-line)" id="taskHistoryBlock"><summary class="text-xs font-semibold cursor-pointer">Work history (${h.length+1})${t.lastCompletedAt?` · first completed ${EX.fmtDate(t.lastCompletedAt)}`:''}</summary><div class="mt-2">${rows}${first}</div></details>`;
+};
+EX.thResults = function(){
+  const ui = EX.ui; const ym = ui.thMonth || EX.monthKey();
+  const all = EX.canSeeAllTaskHistory(); const me = EX.session.employeeId;
+  let pool = EX.get('tasks').filter(t=>t.status==='Done');
+  if(!all) pool = pool.filter(t=>t.assignedTo===me || t._createdBy===me);
+  else if(ui.thEmp) pool = pool.filter(t=>t.assignedTo===ui.thEmp);
+  if(ui.thClient) pool = pool.filter(t=>t.clientId===ui.thClient);
+  if(ui.thType) pool = pool.filter(t=>t.type===ui.thType);
+  if(ui.thScope==='archived') pool = pool.filter(EX.isTaskArchived);
+  const qq = (ui.thQ||'').trim().toLowerCase();
+  if(qq) pool = pool.filter(t=>`${t.title} ${t.description||''} ${t.assignedToName||''} ${(EX.byId('clients',t.clientId)||{}).companyName||''} ${t.type||''}`.toLowerCase().includes(qq));
+  const dayOf = (t)=> EX.dayKeyOf(EX.taskDoneAt(t));
+  const from = ui.thFrom || '', to = ui.thTo || ui.thFrom || '';
+  const ranged = !!(ui.thFrom || ui.thTo);
+  // a text search looks across ALL dates; otherwise show the picked range or the displayed month
+  const results = (ranged ? pool.filter(t=>{ const d = dayOf(t); return (!from || d>=from) && (!to || d<=to); }) : (qq? pool : pool.filter(t=>dayOf(t).startsWith(ym))))
+    .sort((a,b)=> EX.taskDoneAt(b)-EX.taskDoneAt(a));
+  const perDay = {}; pool.forEach(t=>{ const d = dayOf(t); if(d.startsWith(ym)) perDay[d] = (perDay[d]||0)+1; });
+  return {ym, pool, results, perDay, from, to, ranged, qq};
+};
+EX.thQuery = function(v){ EX.ui.thQ = v; EX.thRerender(); };
+EX.thRerender = function(){ const body = document.getElementById('thBody'); if(body) body.innerHTML = EX.thBodyHtml(EX.thResults()); };
+EX.thBodyHtml = function(r){
+  const label = r.qq? 'matching your search (all dates)' : (r.ranged ? (r.from===r.to||!r.to ? EX.fmtDate(new Date(r.from+'T00:00:00').getTime()) : `${r.from?EX.fmtDate(new Date(r.from+'T00:00:00').getTime()):'…'} → ${r.to?EX.fmtDate(new Date(r.to+'T00:00:00').getTime()):'…'}`) : EX.monthLabel(r.ym));
+  return `<div class="text-xs mb-2" style="color:var(--ex-ink-soft)">Showing <b id="thCount">${r.results.length}</b> completed task${r.results.length===1?'':'s'} · ${label}</div>
+  <div class="ex-card overflow-hidden"><div class="overflow-x-auto"><table class="ex-table" id="thTable"><thead><tr><th>Completed</th><th>Task</th><th>Client</th><th>Assigned</th><th>Linked content</th><th>Where</th><th></th></tr></thead><tbody>
+    ${r.results.length? r.results.map(t=>`<tr style="cursor:pointer" data-task="${t.id}" onclick="EX.openTaskDrawer('${t.id}')"><td>${EX.fmtDate(EX.taskDoneAt(t))}${t.reopenCount?` <span class="ex-pill ex-pill-neutral" title="Reopened ${t.reopenCount} time(s) before">re-done</span>`:''}</td><td>${EX.esc(t.title)}${t.description?`<div class="text-[11px]" style="color:var(--ex-ink-soft)">${EX.esc(t.description).slice(0,90)}</div>`:''}</td><td>${EX.esc((EX.byId('clients',t.clientId)||{}).companyName||'—')}</td><td>${EX.esc(t.assignedToName||'—')}</td><td>${EX.taskContentCell(t)}</td><td>${EX.isTaskArchived(t)?'<span class="ex-pill ex-pill-neutral">Hidden from active list</span>':'<span class="ex-pill ex-pill-good">Still on active list</span>'}</td><td>${EX.canReopenTask(t)?`<button type="button" data-reopen="${t.id}" onclick="event.stopPropagation();EX.reopenTask('${t.id}')" class="ex-btn ex-btn-ghost ex-btn-sm">Reopen</button>`:''}</td></tr>`).join('') : `<tr><td colspan="7">${EX.empty('No completed tasks found', r.qq? 'Try different words, or clear the search.' : 'Pick another date, month or filter.')}</td></tr>`}
+  </tbody></table></div></div>`;
+};
+EX.views['taskhistory'] = function(){
+  const ui = EX.ui; const r = EX.thResults(); const all = EX.canSeeAllTaskHistory();
+  const [Y,M] = r.ym.split('-').map(Number);
+  const first = new Date(Y, M-1, 1).getDay(); const days = new Date(Y, M, 0).getDate();
+  const inSel = (k)=> r.ranged && (!r.from || k>=r.from) && (!r.to || k<=r.to);
+  let cells = ''; for(let i=0;i<first;i++) cells += '<div></div>';
+  for(let d=1; d<=days; d++){
+    const k = r.ym+'-'+String(d).padStart(2,'0'); const n = r.perDay[k]||0; const sel = inSel(k);
+    cells += `<button type="button" data-day="${k}" onclick="EX.thPick('${k}')" class="rounded-lg p-1.5 text-center border" style="border-color:${sel?'var(--ex-blue-600)':'var(--ex-line)'};background:${sel?'var(--ex-blue-100)':(n?'var(--ex-blue-50)':'transparent')}"><div class="text-xs">${d}</div><div class="text-[10px] font-semibold tnum" style="color:${n?'var(--ex-good)':'var(--ex-ink-soft)'}">${n||'·'}</div></button>`;
+  }
+  const emps = EX.get('employees').slice().sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+  const clients = EX.get('clients').slice().sort((a,b)=>(a.companyName||'').localeCompare(b.companyName||''));
+  const mode = EX.completedHideMode();
+  return `${EX.pageHead('Completed Tasks', all? 'Every completed task — kept for reports and accountability. Search, filter, or pick a date on the calendar.' : 'Your completed tasks — kept for reports and accountability. Search, filter, or pick a date on the calendar.',
+    `<button onclick="EX.thExportCsv()" class="ex-btn ex-btn-ghost">${EX.icon('download','w-4 h-4')} CSV</button>`)}
+  <div class="rounded-xl p-3 mb-4 text-xs" style="background:var(--ex-blue-50)">Completed tasks leave the active Tasks list <b>${EX.archiveLabel()}</b> but are never deleted — the completion date, assignee, client, description and work history are all kept. ${EX.can('settings')?'You can change this in Company Settings.':''} Use <b>Reopen</b> to bring one back.</div>
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-4">
+    <div class="ex-card p-4">
+      <div class="flex items-center justify-between mb-2"><button onclick="EX.thShift(-1)" class="ex-btn ex-btn-ghost ex-btn-sm">${EX.icon('chevron-left','w-3.5 h-3.5')}</button><div class="font-display font-bold text-sm">${EX.monthLabel(r.ym)}</div><button onclick="EX.thShift(1)" class="ex-btn ex-btn-ghost ex-btn-sm">${EX.icon('chevron-right','w-3.5 h-3.5')}</button></div>
+      <div class="grid grid-cols-7 gap-1 text-center text-[10px] mb-1" style="color:var(--ex-ink-soft)">${['Su','Mo','Tu','We','Th','Fr','Sa'].map(d=>`<div>${d}</div>`).join('')}</div>
+      <div class="grid grid-cols-7 gap-1" id="thCalendar">${cells}</div>
+      <div class="text-[11px] mt-2" style="color:var(--ex-ink-soft)">Numbers show tasks completed that day. Click a day, then another day to select a range.</div>
+    </div>
+    <div class="ex-card p-4 lg:col-span-2">
+      <div class="font-display font-bold text-sm mb-3">Find completed tasks</div>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div class="sm:col-span-2"><label class="ex-label" for="thQ">Search</label><input id="thQ" type="search" class="ex-input" placeholder="Task title, description, client or person (searches all dates)" value="${EX.esc(ui.thQ||'')}" oninput="EX.thQuery(this.value)"/></div>
+        <div><label class="ex-label">From date</label><input type="date" id="thFrom" class="ex-input" value="${ui.thFrom||''}" onchange="EX.thSet('thFrom',this.value)"/></div>
+        <div><label class="ex-label">To date</label><input type="date" id="thTo" class="ex-input" value="${ui.thTo||''}" onchange="EX.thSet('thTo',this.value)"/></div>
+        ${all?`<div><label class="ex-label">Employee</label><select id="thEmp" class="ex-select" onchange="EX.thSet('thEmp',this.value)"><option value="">Everyone</option>${emps.map(e=>`<option value="${e.id}" ${ui.thEmp===e.id?'selected':''}>${EX.esc(e.name)}</option>`).join('')}</select></div>`:''}
+        <div><label class="ex-label">Client</label><select id="thClient" class="ex-select" onchange="EX.thSet('thClient',this.value)"><option value="">All clients</option>${clients.map(c=>`<option value="${c.id}" ${ui.thClient===c.id?'selected':''}>${EX.esc(c.companyName)}</option>`).join('')}</select></div>
+        <div><label class="ex-label">Type</label><select id="thType" class="ex-select" onchange="EX.thSet('thType',this.value)"><option value="">All types</option>${EX.TASK_TYPES.map(k=>`<option ${ui.thType===k?'selected':''}>${k}</option>`).join('')}</select></div>
+        <div><label class="ex-label">Show</label><select id="thScope" class="ex-select" onchange="EX.thSet('thScope',this.value)"><option value="all" ${ui.thScope!=='archived'?'selected':''}>All completed tasks</option><option value="archived" ${ui.thScope==='archived'?'selected':''}>Only those hidden from the active list</option></select></div>
+      </div>
+      <div class="flex items-center gap-2 mt-3"><button onclick="EX.thClear()" class="ex-btn ex-btn-ghost ex-btn-sm">Clear dates</button><button onclick="EX.ui.thQ='';EX.ui.thEmp='';EX.ui.thClient='';EX.ui.thType='';EX.ui.thScope='all';EX.thClear()" class="ex-btn ex-btn-ghost ex-btn-sm">Clear all filters</button></div>
+    </div>
+  </div>
+  <div id="thBody">${EX.thBodyHtml(r)}</div>`;
 };
 
 /* ================= CLIENT CREDENTIALS VAULT ================= */
@@ -5898,9 +6413,10 @@ EX.vaultRemove = function(cid, eid){
 };
 
 /* ---- keep every screen current: the browser re-reads the live collections every 30 s, and everything on focus ---- */
-EX.POLL_FAST = ['tasks','content','employees','notifications','clients','attendance'];
+EX.POLL_FAST = ['tasks','content','employees','notifications','clients','attendance','meetings','config'];
 EX.reloadCompanyConfig = async function(){
   try{ if(!EX.CAP.db) return; const snap = await EX.CAP.db.doc('config/company').get(); const next = snap.exists? snap.data() : null;
+    EX._cfgReady = true;
     if(JSON.stringify(next)!==JSON.stringify(EX.data.companyConfig)){ EX.data.companyConfig = next; EX.scheduleRender(); } }catch(e){}
 };
 EX.pollNow = function(cols){
@@ -6151,7 +6667,7 @@ EX.views['settings'] = function(){
     <div class="ex-card p-5">
       <div class="font-display font-bold text-sm mb-3">General</div>
       <form onsubmit="EX.saveGeneralSettings(event)">
-        ${EX.formGrid([{key:'name',label:'Company name'},{key:'baseCurrency',label:'Base currency',type:'select',options:Object.keys(EX.CURRENCIES)},{key:'taxLabel',label:'Tax label (e.g. GST, VAT)'},{key:'taxRate',label:'Default tax rate %',type:'number'},{key:'assumedCostRatio',label:'Assumed cost ratio for profitability estimates (0-1)',type:'number',step:'0.05'},{key:'officeStart',label:'Office start time (late check-in after +15 min)',type:'time'},{key:'eodTime',label:'Automatic EOD report time',type:'time',hint:'Each working day at this time the EOD reports are generated from the task records.'}], Object.assign({assumedCostRatio:0.6,officeStart:'10:00',eodTime:'18:30'},cfg), 2)}
+        ${EX.formGrid([{key:'name',label:'Company name'},{key:'baseCurrency',label:'Base currency',type:'select',options:Object.keys(EX.CURRENCIES)},{key:'taxLabel',label:'Tax label (e.g. GST, VAT)'},{key:'taxRate',label:'Default tax rate %',type:'number'},{key:'assumedCostRatio',label:'Assumed cost ratio for profitability estimates (0-1)',type:'number',step:'0.05'},{key:'officeStart',label:'Office start time (late check-in after +15 min)',type:'time'},{key:'eodTime',label:'Automatic EOD report time',type:'time',hint:'Each working day at this time the EOD reports are generated from the task records.'},{key:'reminderHours',label:'Deadline & meeting reminders (hours before)',hint:'Comma-separated, e.g. 24, 1 — each person is reminded once at each point.'},{key:'pendingTime',label:'Daily pending-work reminder time',type:'time',hint:'Each working day at this time people with unfinished tasks get one reminder.'},{key:'completedHide',label:'Completed tasks leave the active Tasks list',type:'select',options:[{value:'immediate',label:'Immediately (recommended)'},{value:'24h',label:'After 24 hours'},{value:'7d',label:'After 7 days'}],hint:'They are never deleted — they stay in Completed Tasks and in every report.'}], Object.assign({assumedCostRatio:0.6,officeStart:'10:00',eodTime:'18:30',pendingTime:'10:00',completedHide:'immediate'},cfg,{reminderHours:EX.reminderHours().join(', ')}), 2)}
         <button class="ex-btn ex-btn-primary mt-3">Save</button>
       </form>
     </div>
@@ -6233,7 +6749,11 @@ EX.performRestore = async function(collections){
 };
 EX.saveGeneralSettings = async function(ev){
   ev.preventDefault();
-  const data = EX.readForm(ev.target,[{key:'name'},{key:'baseCurrency'},{key:'taxLabel'},{key:'taxRate',type:'number'},{key:'assumedCostRatio',type:'number'},{key:'officeStart'},{key:'eodTime'}]);
+  const data = EX.readForm(ev.target,[{key:'name'},{key:'baseCurrency'},{key:'taxLabel'},{key:'taxRate',type:'number'},{key:'assumedCostRatio',type:'number'},{key:'officeStart'},{key:'eodTime'},{key:'reminderHours'},{key:'pendingTime'},{key:'completedHide'}]);
+  { const hrs = String(data.reminderHours||'').split(/[\s,]+/).map(Number).filter(n=>n>0 && n<=720);
+    if(hrs.length) data.reminderHours = Array.from(new Set(hrs)).sort((a,b)=>b-a); else delete data.reminderHours; }
+  if(!/^\d{2}:\d{2}$/.test(data.pendingTime||'')) delete data.pendingTime;
+  if(!EX.COMPLETED_HIDE_MODES[data.completedHide]) delete data.completedHide;
   if(!/^\d{2}:\d{2}$/.test(data.officeStart||'')) delete data.officeStart;
   if(!/^\d{2}:\d{2}$/.test(data.eodTime||'')) delete data.eodTime;
   await EX.setConfig(data); EX.toast('Settings saved','good');
