@@ -346,6 +346,11 @@ EX.dbOffline = false;
 // localStorage (e.g. a normal login, not a fresh signup) to complete.
 EX.employeesReady = false;
 
+// A refresh that STARTED before one of our own writes finished may carry data from before that write. If it were applied, a task you just
+// created would vanish for a moment (and one you just deleted would come back). Remember when each write finished; reads that began earlier are discarded and repeated.
+EX._wdone = {};
+EX._wrote = function(col){ EX._wdone[col] = (window.performance && performance.now)? performance.now() : Date.now(); };
+EX._nowMs = ()=> (window.performance && performance.now)? performance.now() : Date.now();
 EX.COLLECTIONS = ['config','employees','leads','proposals','clients','content','tasks','invoices','payments',
   'expenses','vendors','vendorInvoices','bankAccounts','attendance','leaveRequests','wfhRequests','meetings',
   'supportTickets','notifications','videoShoots','auditLog','workRequests','companyAssets'];
@@ -419,7 +424,10 @@ EX.makeSupabaseDb = function(sb){
         // own instead of requiring a manual reload.
         async function load(attempt){
           attempt = attempt || 0;
+          const t0 = EX._nowMs();
           const { data, error } = await sb.from(name).select('id,data,created_at,updated_at').order('created_at', { ascending: true });
+          if(!error && (EX._wdone[name]||0) > t0 && (load._stale = (load._stale||0)+1) <= 6){ setTimeout(()=> load(0), 250); return; }   // stale: a write finished while this read was in flight
+          load._stale = 0;
           if(error){
             if(attempt < 4){ setTimeout(()=> load(attempt+1), 1000 * Math.pow(2, attempt)); return; }
             onError && onError(EX.mapSupabaseError(error)); return;
@@ -606,7 +614,7 @@ EX.add = async function(col,payload){
     }
   }catch(_e){}
   try{
-    const ref = await EX.CAP.db.collection(col).add(body);
+    const ref = await EX.CAP.db.collection(col).add(body); EX._wrote(col);
     EX.afterWrite(col, 'add', ref.id, body);
     return ref.id;
   }catch(e){
@@ -620,7 +628,7 @@ EX.setId = async function(col,id,payload){
   if(!EX.CAP.db){ EX.toast('This view is not connected to the workspace database — check that SUPABASE_URL/SUPABASE_ANON_KEY are set correctly in config.js and that the Supabase project is reachable.', 'bad'); throw Object.assign(new Error('db unavailable'), {_exHandled:true}); }
   try{
     const full = Object.assign({}, payload, {_updatedAt: EX.now()});
-    await EX.CAP.db.collection(col).doc(id).set(full);
+    await EX.CAP.db.collection(col).doc(id).set(full); EX._wrote(col);
     EX.afterWrite(col, 'set', id, full);
   }catch(e){
     console.warn('EX.setId failed', col, id, e);
@@ -633,7 +641,7 @@ EX.patch = async function(col,id,payload){
   if(!EX.CAP.db){ EX.toast('This view is not connected to the workspace database — check that SUPABASE_URL/SUPABASE_ANON_KEY are set correctly in config.js and that the Supabase project is reachable.', 'bad'); throw Object.assign(new Error('db unavailable'), {_exHandled:true}); }
   try{
     const full = Object.assign({}, payload, {_updatedAt: EX.now()});
-    await EX.CAP.db.collection(col).doc(id).update(full);
+    await EX.CAP.db.collection(col).doc(id).update(full); EX._wrote(col);
     EX.afterWrite(col, 'patch', id, full);
   }catch(e){
     console.warn('EX.patch failed', col, id, e);
@@ -645,7 +653,7 @@ EX.patch = async function(col,id,payload){
 EX.remove = async function(col,id){
   if(!EX.CAP.db){ EX.toast('This view is not connected to the workspace database — check that SUPABASE_URL/SUPABASE_ANON_KEY are set correctly in config.js and that the Supabase project is reachable.', 'bad'); throw Object.assign(new Error('db unavailable'), {_exHandled:true}); }
   try{
-    await EX.CAP.db.collection(col).doc(id).delete();
+    await EX.CAP.db.collection(col).doc(id).delete(); EX._wrote(col);
     EX.afterWrite(col, 'remove', id);
   }catch(e){
     console.warn('EX.remove failed', col, id, e);
@@ -687,6 +695,7 @@ EX.setConfig = async function(payload){
     const existing = EX.data.companyConfig;
     if(existing) await EX.CAP.db.doc('config/company').update(payload);
     else await EX.CAP.db.doc('config/company').set(payload);
+    EX._wrote('config');
     EX.data.companyConfig = Object.assign({}, existing||{}, payload); EX.scheduleRender();   // show it at once, even if live updates are slow
   }catch(e){
     console.warn('EX.setConfig failed', e);
@@ -5982,7 +5991,7 @@ EX.notifyOnce = async function(key, payload){
   EX._notifSeen[id] = 1;
   const body = Object.assign({read:false, key}, payload, {_createdAt:EX.now(), _updatedAt:EX.now()});
   try{
-    const { error } = await EX.sb.from('notifications').upsert({id, data:body}, {onConflict:'id', ignoreDuplicates:true});
+    const { error } = await EX.sb.from('notifications').upsert({id, data:body}, {onConflict:'id', ignoreDuplicates:true}); EX._wrote('notifications');
     if(error){ delete EX._notifSeen[id]; return false; }
     const list = EX.data.notifications; if(Array.isArray(list) && !list.find(d=>d.id===id)) list.push(Object.assign({id}, body));
     return true;
