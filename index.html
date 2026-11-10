@@ -1497,8 +1497,8 @@ EX.dataTable = function(opts){
     <table class="ex-table">
       <thead><tr>${opts.columns.map(c=>`<th>${c.label}</th>`).join('')}</tr></thead>
       <tbody>
-      ${rows.length? rows.map(r=>`<tr data-search="${(opts.searchKey?opts.searchKey(r):'').toLowerCase().replace(/"/g,'')}" ${opts.filterKey?`data-filter="${opts.filterKey(r)}"`:''} ${opts.rowClick?`style="cursor:pointer" onclick="${opts.rowClick(r)}"`:''}>
-        ${opts.columns.map(c=>`<td>${c.get(r)}</td>`).join('')}
+      ${rows.length? rows.map(r=>`<tr data-search="${String(opts.searchKey?(opts.searchKey(r)||''):'').toLowerCase().replace(/"/g,'').replace(/</g,' ')}" ${opts.filterKey?`data-filter="${opts.filterKey(r)}"`:''} ${opts.rowClick?`style="cursor:pointer" onclick="${opts.rowClick(r)}"`:''}>
+        ${opts.columns.map(c=>{ let v = c.get(r); if(v===undefined||v===null||v==='undefined'||v==='null'||(typeof v==='number'&&isNaN(v))) v = '—'; return `<td>${v}</td>`; }).join('')}
       </tr>`).join('') : `<tr><td colspan="${opts.columns.length}">${EX.empty(opts.emptyLabel||'Nothing here yet', opts.emptySub||'')}</td></tr>`}
       </tbody>
     </table>
@@ -3986,7 +3986,7 @@ EX.views['support'] = function(){
   return `${EX.pageHead('Support Desk')}
   ${EX.dataTable({id:'supportGlobal', rows:items, searchKey:t=>`${t.clientName} ${t.category} ${t.message}`, filterOptions:EX.TICKET_STATUSES, filterKey:t=>t.status, filterLabel:'status',
     columns:[{label:'Client',get:t=>t.clientName||'—'},{label:'Category',get:t=>t.category},{label:'Priority',get:t=>t.priority},
-      {label:'Message',get:t=>`<span class="line-clamp-1">${t.message}</span>`},
+      {label:'Message',get:t=>`<span class="line-clamp-1">${t.message||"—"}</span>`},
       {label:'Assigned',get:t=>`<select onchange="EX.assignTicket('${t.id}',this.value)" class="ex-select !w-auto !py-1 text-xs"><option value="">Unassigned</option>${EX.get('employees').filter(e=>['super_admin','ops_head','accounts','dme'].includes(e.role)).map(e=>`<option value="${e.id}" ${t.assignedEmployeeId===e.id?'selected':''}>${e.name}</option>`).join('')}</select>`},
       {label:'Status',get:t=>`<select onchange="EX.setTicketStatus('${t.id}',this.value)" class="ex-select !w-auto !py-1 text-xs">${EX.TICKET_STATUSES.map(s=>`<option ${s===t.status?'selected':''}>${s}</option>`).join('')}</select>`}],
     emptyLabel:'No support tickets yet'})}`;
@@ -4075,8 +4075,8 @@ EX.invoiceDetail = function(id){
   </div>
   <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
     <div class="lg:col-span-2 ex-card p-5">
-      <table class="ex-table"><thead><tr><th>Description</th><th>Qty</th><th>Rate</th><th>Amount</th></tr></thead>
-      <tbody>${(inv.lineItems||[]).map(l=>`<tr><td>${l.desc}</td><td class="tnum">${l.qty}</td><td class="tnum">${EX.fmtMoney(l.rate,inv.currency)}</td><td class="tnum">${EX.fmtMoney(l.amount,inv.currency)}</td></tr>`).join('')}</tbody></table>
+      <div class="overflow-x-auto"><table class="ex-table"><thead><tr><th>Description</th><th>Qty</th><th>Rate</th><th>Amount</th></tr></thead>
+      <tbody>${(inv.lineItems||[]).map(l=>`<tr><td>${l.desc}</td><td class="tnum">${l.qty}</td><td class="tnum">${EX.fmtMoney(l.rate,inv.currency)}</td><td class="tnum">${EX.fmtMoney(l.amount,inv.currency)}</td></tr>`).join('')}</tbody></table></div>
       <div class="flex justify-end mt-3"><div class="w-56 text-sm space-y-1">
         <div class="flex justify-between"><span style="color:var(--ex-ink-soft)">Subtotal</span><span class="tnum">${EX.fmtMoney(inv.subtotal,inv.currency)}</span></div>
         <div class="flex justify-between"><span style="color:var(--ex-ink-soft)">Tax (${inv.taxRate}%)</span><span class="tnum">${EX.fmtMoney(inv.taxAmount,inv.currency)}</span></div>
@@ -4257,8 +4257,8 @@ EX.views['finance'] = function(){
   </div>
   <div class="ex-card p-5">
     <div class="flex items-center justify-between mb-3"><div class="font-display font-bold text-sm">Client Profitability Ranking</div><span class="text-xs" style="color:var(--ex-ink-soft)">Margin is assumption-based (${Math.round(((EX.data.companyConfig&&EX.data.companyConfig.assumedCostRatio)||0.6)*100)}% cost ratio) — set a real ratio in Settings once delivery costs are tracked per client.</span></div>
-    <table class="ex-table"><thead><tr><th>Client</th><th>Monthly Revenue</th><th>Est. Profit</th><th>Est. Margin</th><th>Health</th></tr></thead>
-    <tbody>${clientsRanked.map(c=>{const h=EX.computeClientHealth(c); return `<tr onclick="EX.route('clients','${c.id}')" style="cursor:pointer"><td>${c.companyName}</td><td class="tnum">${EX.fmtMoney(c.rev,c.currency)}</td><td class="tnum">${EX.fmtMoney(c.estProfit,c.currency)}</td><td class="tnum">${c.estMargin}%</td><td>${EX.pill(h.label)}</td></tr>`;}).join('')||`<tr><td colspan="5">${EX.empty('No active clients yet')}</td></tr>`}</tbody></table>
+    <div class="overflow-x-auto"><table class="ex-table"><thead><tr><th>Client</th><th>Monthly Revenue</th><th>Est. Profit</th><th>Est. Margin</th><th>Health</th></tr></thead>
+    <tbody>${clientsRanked.map(c=>{const h=EX.computeClientHealth(c); return `<tr onclick="EX.route('clients','${c.id}')" style="cursor:pointer"><td>${c.companyName}</td><td class="tnum">${EX.fmtMoney(c.rev,c.currency)}</td><td class="tnum">${EX.fmtMoney(c.estProfit,c.currency)}</td><td class="tnum">${c.estMargin}%</td><td>${EX.pill(h.label)}</td></tr>`;}).join('')||`<tr><td colspan="5">${EX.empty('No active clients yet')}</td></tr>`}</tbody></table></div>
   </div>`;
 };
 
@@ -4540,7 +4540,7 @@ EX.views['bank'] = function(){
   <div class="ex-card p-5">
     <div class="font-display font-bold text-sm mb-1">Personal Account Receipts</div>
     <p class="text-xs mb-3" style="color:var(--ex-ink-soft)">Payments clients made into a personal (non-company) account. Tracked separately and never mixed into the balances above.</p>
-    ${personalReceipts.length? `<table class="ex-table"><thead><tr><th>Client</th><th>Amount</th><th>Ref</th><th>Status</th></tr></thead><tbody>${personalReceipts.map(p=>`<tr><td>${(EX.byId('clients',p.clientId)||{}).companyName||'—'}</td><td class="tnum">${EX.fmtMoney(p.amountClaimed)}</td><td>${p.transactionRef||'—'}</td><td>${EX.pill(p.status)}</td></tr>`).join('')}</tbody></table>` : EX.empty('None recorded')}
+    ${personalReceipts.length? `<div class="overflow-x-auto"><table class="ex-table"><thead><tr><th>Client</th><th>Amount</th><th>Ref</th><th>Status</th></tr></thead><tbody>${personalReceipts.map(p=>`<tr><td>${(EX.byId('clients',p.clientId)||{}).companyName||'—'}</td><td class="tnum">${EX.fmtMoney(p.amountClaimed)}</td><td>${p.transactionRef||'—'}</td><td>${EX.pill(p.status)}</td></tr>`).join('')}</tbody></table></div>` : EX.empty('None recorded')}
   </div>`;
 };
 EX.showBankModal = function(id){
@@ -5300,9 +5300,9 @@ EX.tmResultsHtml = function(){
   const cards = rows.map(({e,c,shown})=>{
     const open = st.open[e.id]===undefined ? !!(st.q||'').trim() : !!st.open[e.id];
     const pct = c.assigned? Math.round(c.done/c.assigned*100) : 0;
-    const table = open? (shown.length? `<div class="overflow-x-auto border-t" style="border-color:var(--ex-line)"><table class="ex-table"><thead><tr><th>Task</th><th>Client</th><th>Status</th><th>Priority</th><th>Deadline</th><th>Linked content</th></tr></thead><tbody>
+    const table = open? (shown.length? `<div class="overflow-x-auto border-t" style="border-color:var(--ex-line)"><div class="overflow-x-auto"><table class="ex-table"><thead><tr><th>Task</th><th>Client</th><th>Status</th><th>Priority</th><th>Deadline</th><th>Linked content</th></tr></thead><tbody>
       ${shown.map(t=>`<tr style="cursor:pointer" onclick="EX.openTaskDrawer('${t.id}')"><td>${EX.esc(t.title)}</td><td>${EX.esc((EX.byId('clients',t.clientId)||{}).companyName||'—')}</td><td>${EX.pill(t.status)}${EX.isTaskArchived(t)?' <span class="ex-pill ex-pill-neutral">Archived</span>':''}</td><td>${EX.esc(t.priority||'—')}</td><td ${EX.taskOverdue(t)?'style="color:var(--ex-bad);font-weight:600"':''}>${EX.fmtDate(t.deadline)}${EX.taskOverdue(t)?' · overdue':''}</td><td>${EX.taskContentCell(t)}</td></tr>`).join('')}
-      </tbody></table></div>` : `<div class="p-4 text-xs border-t" style="border-color:var(--ex-line);color:var(--ex-ink-soft)">No tasks match these filters.</div>`) : '';
+      </tbody></table></div></div>` : `<div class="p-4 text-xs border-t" style="border-color:var(--ex-line);color:var(--ex-ink-soft)">No tasks match these filters.</div>`) : '';
     return `<div class="ex-card mb-3 overflow-hidden" data-tm-emp="${e.id}">
       <button type="button" class="w-full text-left p-4 flex flex-wrap items-center gap-3" onclick="EX.tmToggle('${e.id}')">
         ${EX.avatar(e.name,36)}
@@ -5735,7 +5735,7 @@ EX.backfillContentTasks = async function(){
 EX.normalizeUrl = function(raw){
   let s = String(raw||'').trim();
   if(!s) return {ok:false, error:'Please enter a link.'};
-  if(/\s/.test(s)) return {ok:false, error:'A link cannot contain spaces.'};
+  s = s.replace(/\s+/g,'%20');   // links pasted with spaces in a file name still work
   if(!/^[a-z][a-z0-9+.-]*:/i.test(s)) s = 'https://'+s;
   let u; try{ u = new URL(s); }catch(e){ return {ok:false, error:'That does not look like a valid web address.'}; }
   if(!/^https?:$/.test(u.protocol)) return {ok:false, error:'Only http:// or https:// links are allowed.'};
@@ -5836,7 +5836,7 @@ EX.assetBodyHtml = function(c){
       <div class="flex flex-wrap items-center gap-2">
         <span class="ex-pill ex-pill-neutral">${EX.esc(a.category||'Other')}</span>${a.restricted?'<span class="ex-pill ex-pill-warn" title="Only leadership, DMEs and the Creative Head can see this">Restricted</span>':''}
         <span class="text-[11px]" style="color:var(--ex-ink-soft)">Updated ${EX.fmtDate(a._updatedAt||a._createdAt)}</span>
-        ${manage?`<button type="button" title="Edit asset" data-asset-edit="${a.id}" onclick="EX.assetModal('${c.id}','${a.id}')" class="ex-btn ex-btn-ghost ex-btn-sm !p-1.5">${EX.icon('edit','w-4 h-4')}</button><button type="button" title="Delete asset" data-asset-del="${a.id}" onclick="EX.assetDelete('${c.id}','${a.id}')" class="ex-btn ex-btn-ghost ex-btn-sm !p-1.5" style="color:var(--ex-bad)">${EX.icon('trash','w-4 h-4')}</button>`:''}
+        ${manage?`<button type="button" title="Edit asset" data-asset-edit="${a.id}" onclick="EX.assetModal('${c.id}','${a.id}')" class="ex-btn ex-btn-ghost ex-btn-sm">${EX.icon('edit','w-3.5 h-3.5')} Edit</button><button type="button" title="Delete asset" data-asset-del="${a.id}" onclick="EX.assetDelete('${c.id}','${a.id}')" class="ex-btn ex-btn-ghost ex-btn-sm " style="color:var(--ex-bad)">${EX.icon('trash','w-3.5 h-3.5')} Delete</button>`:''}
       </div>
     </div>`).join('')}</div>`;
   const filtered = (cat||q) && all.length? `<div class="text-xs mb-2" style="color:var(--ex-ink-soft)">Showing ${shown.length} of ${all.length} · <button type="button" class="underline" onclick="EX.assetClearFilters()">clear filters</button></div>` : '';
@@ -5914,7 +5914,8 @@ EX.saveAsset = async function(ev, cid, assetId, fromModal){
       await EX.setId('config', id, {kind:'clientAsset', clientId:cid, name, url:n.url, category, description, restricted, _createdAt:EX.now(), _createdBy:me.id||'', _createdByName:me.name||'', updatedByName:me.name||''});
       await EX.addAudit('Added client asset','clients',cid,null,{name,url:n.url,category});
     }
-  }catch(e){ if(btn){ btn.disabled = false; btn.textContent = 'Save'; } err('Could not save — please check your connection and try again.'); return; }
+  }catch(e){ if(btn){ btn.disabled = false; btn.textContent = 'Save'; } const why = (e && e.message)? ' ('+String(e.message).slice(0,160)+')' : ''; err('Could not save'+why+' — please check your connection and try again.'); EX.toast('Asset not saved'+why,'bad'); return; }
+  EX.ui.assetCat = ''; EX.ui.assetQ = '';   // a filter must never hide what was just saved
   EX.toast(assetId? 'Asset updated' : 'Asset added','good');
   EX.assetAfter(cid, fromModal); EX.assetsRerender();
 };
@@ -6602,9 +6603,9 @@ EX.updateForecast = function(applyPreset){
     for(let i=0;i<months;i++){ m = m*(1+g-c); e = e*1.01; }
     rows.push({months, revenue:m, expenses:e, profit:m-e});
   });
-  document.getElementById('fc-out').innerHTML = `<table class="ex-table"><thead><tr><th>Horizon</th><th>Revenue</th><th>Expenses</th><th>Profit</th></tr></thead><tbody>
+  document.getElementById('fc-out').innerHTML = `<div class="overflow-x-auto"><table class="ex-table"><thead><tr><th>Horizon</th><th>Revenue</th><th>Expenses</th><th>Profit</th></tr></thead><tbody>
     ${rows.map(r=>`<tr><td>${r.months} mo</td><td class="tnum">${EX.fmtMoney(r.revenue)}</td><td class="tnum">${EX.fmtMoney(r.expenses)}</td><td class="tnum" style="color:${r.profit>=0?'var(--ex-good)':'var(--ex-bad)'}">${EX.fmtMoney(r.profit)}</td></tr>`).join('')}
-  </tbody></table><div class="text-[11px] mt-2" style="color:var(--ex-ink-soft)">A projection based on the assumptions above — not a guarantee.</div>`;
+  </tbody></table></div><div class="text-[11px] mt-2" style="color:var(--ex-ink-soft)">A projection based on the assumptions above — not a guarantee.</div>`;
 };
 EX.updateProfitEngine = function(){
   const target = Number(document.getElementById('pe-target').value)||0;
@@ -6643,8 +6644,8 @@ EX.views['integrations'] = function(){
   ];
   return `${EX.pageHead('Integrations', 'Real status only — nothing here is simulated as live without credentials.')}
   <div class="ex-card divide-y" style="border-color:var(--ex-line)">
-    ${items.map(i=>`<div class="flex items-center justify-between p-4">
-      <div><div class="font-medium text-sm">${i.name}</div>${i.note?`<div class="text-xs mt-0.5" style="color:var(--ex-ink-soft)">${i.note}</div>`:''}</div>
+    ${items.map(i=>`<div class="flex flex-wrap items-center justify-between gap-2 p-4">
+      <div class="min-w-0"><div class="font-medium text-sm break-words">${i.name}</div>${i.note?`<div class="text-xs mt-0.5" style="color:var(--ex-ink-soft)">${i.note}</div>`:''}</div>
       <div class="flex items-center gap-2">${EX.pill(i.status)}${i.status==='Not Connected'?`<button onclick="EX.toast('Connecting requires API credentials from the provider — add them in a future integrations setup step.','warn')" class="ex-btn ex-btn-ghost ex-btn-sm">Configure</button>`:''}</div>
     </div>`).join('')}
   </div>`;
@@ -6988,9 +6989,9 @@ EX.portalViews['portal-payments'] = function(){
     </div>`).join('') : `<div class="ex-card p-5 mb-4">${EX.empty('Nothing due right now')}</div>`}
   <div class="ex-card p-5">
     <div class="font-semibold text-sm mb-3">Payment history</div>
-    ${history.length? `<table class="ex-table"><thead><tr><th>Date</th><th>Invoice</th><th>Amount</th><th>Method</th><th>Status</th><th></th></tr></thead><tbody>
+    ${history.length? `<div class="overflow-x-auto"><table class="ex-table"><thead><tr><th>Date</th><th>Invoice</th><th>Amount</th><th>Method</th><th>Status</th><th></th></tr></thead><tbody>
       ${history.map(p=>`<tr><td>${EX.fmtDate(p._createdAt)}</td><td>${(EX.byId('invoices',p.invoiceId)||{}).invoiceNumber||'—'}</td><td class="tnum">${EX.fmtMoney(p.amountClaimed)}</td><td>${p.method}</td><td>${EX.pill(p.status)}</td><td>${p.status==='Paid'?`<button onclick="EX.viewReceipt('${p.id}')" class="ex-btn ex-btn-ghost ex-btn-sm">Receipt</button>`:''}</td></tr>`).join('')}
-    </tbody></table>` : EX.empty('No payments yet')}
+    </tbody></table></div>` : EX.empty('No payments yet')}
   </div>`;
 };
 EX.openPayNow = function(invoiceId){
