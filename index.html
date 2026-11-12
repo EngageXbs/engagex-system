@@ -1577,6 +1577,8 @@ EX.route = function(key, param){
 EX.parseHash = function(){
   const h = (location.hash||'').replace(/^#\/?/, '');
   const [key, param] = h.split('/');
+  // opening a client's dashboard (from anywhere, or switching to another client) always starts on the CURRENT month
+  if(key==='clients' && param && !(EX.route_ && EX.route_.key==='clients' && EX.route_.param===param)) EX.ui.clientMonth = null;
   EX.route_ = {key: key||'', param: param||null};
 };
 
@@ -3299,22 +3301,53 @@ EX.performDeleteClient = async function(id){
   EX.toast(c.companyName+' deleted','good');
   EX.route('clients');
 };
-/* ---- Content (per client) ---- */
+/* ---- Content (per client): month-based pipeline ---- */
+// The client dashboard has its own selected month (always the current month when the page is opened). Browsing months never changes any record.
+EX.clientMonth = ()=> (/^\d{4}-\d{2}$/.test(EX.ui.clientMonth||'')? EX.ui.clientMonth : EX.monthKey());
+EX.clientMonthRange = function(c){
+  const cur = EX.monthKey();
+  const months = EX.get('content').filter(x=>x.clientId===c.id).map(x=>EX.contentMonth(x)).filter(m=>/^\d{4}-\d{2}$/.test(m||''));
+  if(c._createdAt) months.push(EX.monthKey(new Date(c._createdAt)));
+  months.push(cur);
+  const sorted = months.sort();
+  return {min:sorted[0], max:sorted[sorted.length-1], cur};   // max = current month, unless content is already scheduled for a later month
+};
+EX.shiftClientMonth = function(clientId, d){
+  const c = EX.byId('clients', clientId); if(!c) return;
+  const r = EX.clientMonthRange(c); const next = EX.shiftMonth(EX.clientMonth(), d);
+  if(next < r.min || next > r.max) return;
+  EX.ui.clientMonth = next; EX.scheduleRender();
+};
+// default 'For month' for a new item: the month being viewed (client dashboard => its selected month; Content Studio => its month)
+EX.newContentMonth = ()=> (EX.route_.key==='clients' && EX.route_.param) ? EX.clientMonth() : (EX.ui.contentMonth||EX.monthKey());
+EX.clientThisMonth = function(){ EX.ui.clientMonth = null; EX.scheduleRender(); };
+EX.clientMonthBar = function(c){
+  const ym = EX.clientMonth(); const r = EX.clientMonthRange(c);
+  const canPrev = ym > r.min, canNext = ym < r.max; const isCur = ym===r.cur;
+  const btn = (dis, d, label, id, title)=> `<button type="button" id="${id}" ${dis?'disabled':''} title="${title}" onclick="EX.shiftClientMonth('${c.id}',${d})" class="ex-btn ex-btn-ghost ex-btn-sm" ${dis?'style="opacity:.45;cursor:not-allowed"':''}>${label}</button>`;
+  return `<div class="flex flex-wrap items-center gap-2" id="clientMonthBar">
+    ${btn(!canPrev,-1,'← Previous Month','clientPrevMonth', canPrev?'Show '+EX.monthLabel(EX.shiftMonth(ym,-1)):'No earlier month for this client')}
+    <span class="ex-pill ex-pill-info font-semibold" id="clientMonthLabel" aria-live="polite">${EX.monthLabel(ym)}</span>
+    ${btn(!canNext,1,'Next Month →','clientNextMonth', canNext?'Show '+EX.monthLabel(EX.shiftMonth(ym,1)):'Future months appear once content is scheduled for them')}
+    ${isCur?'':`<button type="button" id="clientThisMonth" onclick="EX.clientThisMonth()" class="ex-btn ex-btn-primary ex-btn-sm">Back to ${EX.monthLabel(r.cur)}</button>`}
+  </div>`;
+};
 EX.clientContentTab = function(c){
-  const ym = EX.ui.contentMonth || EX.monthKey();
-  const items = EX.get('content').filter(x=>x.clientId===c.id);
+  const ym = EX.clientMonth();
+  const items = EX.get('content').filter(x=>x.clientId===c.id && EX.contentMonth(x)===ym);   // month AND year; every status stays visible
+  const rejectedN = items.filter(x=>x.status==='Rejected').length;
   const t = EX.contentTrackerFor(c, ym);
   const kpi = (l,v,col)=>`<div class="ex-card p-3"><div class="ex-label">${l}</div><div class="font-display text-lg font-bold tnum" style="color:${col||'var(--ex-ink)'}">${v}</div></div>`;
   const studioStrip = `<div class="ex-card p-3 mb-3 flex flex-wrap items-center justify-between gap-2" id="clientStudioStrip"><div><div class="font-display font-bold text-sm">${EX.esc(c.companyName)} — Content Studio</div><div class="text-xs" style="color:var(--ex-ink-soft)">Plan, schedule and track this client's content.</div></div>
     <div class="flex flex-wrap items-center gap-2">${EX.schedulerBlock(c)}<button type="button" onclick="EX.ui.clientTab='assets';EX.scheduleRender()" class="ex-btn ex-btn-ghost">${EX.icon('layers','w-4 h-4')} Client assets</button></div></div>`;
-  return `${studioStrip}<div class="flex flex-wrap items-center justify-between gap-2 mb-3"><div class="font-display font-bold text-sm">Monthly commitment — ${EX.monthLabel(ym)} <span class="ex-pill ex-pill-${t.tone} ml-1">${EX.esc(t.labelFull)}</span></div>${EX.contentMonthBar()}</div>
+  return `${studioStrip}<div class="flex flex-wrap items-center justify-between gap-2 mb-3"><div class="font-display font-bold text-sm">Monthly commitment — ${EX.monthLabel(ym)} <span class="ex-pill ex-pill-${t.tone} ml-1">${EX.esc(t.labelFull)}</span></div>${EX.clientMonthBar(c)}</div>
   ${t.pausedPartly?`<div class="rounded-xl p-3 mb-3 text-sm" style="background:var(--ex-warn-bg);color:var(--ex-warn)">Work ${t.paused?'is paused':'was paused for part of the month'} for this client in ${EX.monthLabel(ym)}${t.pausedPartly.reason?' ('+EX.esc(t.pausedPartly.reason)+')':''}${t.paused?' — commitments are not being chased.':'.'}</div>`:''}
-  <div class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-3">${kpi('Committed',t.tot.committed)}${kpi('Delivered',t.tot.delivered+' / '+(t.target||0))}${kpi('Client approved',t.tot.approved,'var(--ex-good)')}${kpi('Re-work',t.tot.rework,t.tot.rework?'var(--ex-bad)':'')}${kpi('Pending approval',t.tot.pending,t.tot.pending?'var(--ex-warn)':'')}</div>
+  <div class="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-3 mb-3" id="clientMonthKpis">${kpi('Committed',t.tot.committed)}${kpi('Created',t.tot.created)}${kpi('Delivered',t.tot.delivered+' / '+(t.target||0))}${kpi('Client approved',t.tot.approved,'var(--ex-good)')}${kpi('Pending approval',t.tot.pending,t.tot.pending?'var(--ex-warn)':'')}${kpi('Re-work',t.tot.rework,t.tot.rework?'var(--ex-bad)':'')}${kpi('Rejected',rejectedN,rejectedN?'var(--ex-bad)':'')}</div>
   <div class="ex-card p-4 mb-4"><div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
       <div><div class="text-xs mb-1" style="color:var(--ex-ink-soft)">Delivery progress (delivered of committed)</div>${EX.trackerBar(t.tot.delivered, t.target)}</div>
       <div><div class="text-xs mb-1" style="color:var(--ex-ink-soft)">Client approval progress (approved of committed)</div>${EX.trackerBar(t.tot.approved, t.target, 'var(--ex-blue-500)')}</div></div>
     ${EX.deliverablePlanBar(c, ym)}${EX.trackerTypeTable(t)}</div>
-  <div class="flex items-center justify-between mb-3"><div class="font-display font-bold text-sm">Content Pipeline (all months)</div><button onclick="EX.addContentModal('${c.id}')" class="ex-btn ex-btn-primary ex-btn-sm">${EX.icon('plus','w-3.5 h-3.5')} New content item</button></div>
+  <div class="flex items-center justify-between mb-3"><div class="font-display font-bold text-sm" id="pipelineTitle">Content Pipeline — ${EX.monthLabel(ym)} <span class="text-xs font-normal" style="color:var(--ex-ink-soft)">· ${items.length} item${items.length===1?'':'s'}</span></div><button onclick="EX.addContentModal('${c.id}')" class="ex-btn ex-btn-primary ex-btn-sm">${EX.icon('plus','w-3.5 h-3.5')} New content item</button></div>
   ${EX.dataTable({id:'contentTable_'+c.id, rows:items, searchKey:x=>x.title+x.type, filterOptions:EX.CONTENT_STATUSES, filterKey:x=>x.status, filterLabel:'status',
     rowClick:x=>`EX.openContentDrawer('${x.id}')`,
     columns:[
@@ -3327,7 +3360,7 @@ EX.clientContentTab = function(c){
       {label:'Publish', get:x=>x.publishDate? EX.fmtDate(x.publishDate) : '—'},
       {label:'Assigned', get:x=>{const e=EX.byId('employees',x.assignedTo); return e?EX.esc(e.name):'—';}},
       {label:'Created by', get:x=>EX.esc(EX.contentCreatorLabel(x))},
-    ].concat(EX.canDelete()?[{label:'',get:x=>EX.contentActionCell(x)}]:[]), emptyLabel:'No content items yet'})}`;
+    ].concat(EX.canDelete()?[{label:'',get:x=>EX.contentActionCell(x)}]:[]), emptyLabel:'No content for '+EX.monthLabel(ym), emptySub:'Use “New content item” to add one for this month, or switch month above.'})}`;
 };
 EX.addContentModal = function(clientId){
   EX.openModal(`${EX.modalHeader('New content item')}
@@ -3339,14 +3372,14 @@ EX.addContentModal = function(clientId){
         {key:'assignedTo',label:'Assigned to',type:'select',options:EX.assigneeOptions()},
         {key:'deadline',label:'Deadline',type:'date'},
         {key:'publishDate',label:'Scheduled publish date (optional)',type:'date',hint:'The team and the client\'s DME are reminded as this date approaches.'},
-      ],{forMonth:EX.ui.contentMonth||EX.monthKey(), assignedTo:(EX.canAssignOthers()?'':EX.session.employeeId)},2)}
+      ],{forMonth:EX.newContentMonth(), assignedTo:(EX.canAssignOthers()?'':EX.session.employeeId)},2)}
       <div class="flex justify-end gap-2 pt-2"><button type="button" class="ex-btn ex-btn-ghost" onclick="EX.closeModal()">Cancel</button><button class="ex-btn ex-btn-primary">Create</button></div>
     </form>`);
 };
 EX.saveContent = async function(ev, clientId){
   ev.preventDefault();
   const data = EX.readForm(ev.target, [{key:'title'},{key:'type'},{key:'forMonth'},{key:'assignedTo'},{key:'deadline',type:'date'},{key:'publishDate',type:'date'}]);
-  if(!/^\d{4}-\d{2}$/.test(data.forMonth||'')) data.forMonth = data.deadline? EX.monthKey(new Date(data.deadline)) : (EX.ui.contentMonth||EX.monthKey());
+  if(!/^\d{4}-\d{2}$/.test(data.forMonth||'')) data.forMonth = data.deadline? EX.monthKey(new Date(data.deadline)) : EX.newContentMonth();
   if(!EX.canAssignOthers()) data.assignedTo = EX.session.employeeId;
   data.clientId = clientId; data.status='Draft'; data.comments=[]; data.clientApproval='Pending';
   const id = await EX.add('content', data);
