@@ -438,10 +438,22 @@ EX.makeSupabaseDb = function(sb){
           }) })) });
         }
         (EX._reload = EX._reload || {})[name] = ()=> load(0);
+        // Cheap "has anything changed?" check (one tiny request: row count + newest change time). Used every few seconds so that
+        // work assigned by someone else shows up almost immediately even when the database's realtime push is not switched on / is blocked.
+        (EX._probe = EX._probe || {})[name] = async ()=>{
+          try{
+            const { data, count, error } = await sb.from(name).select('updated_at', { count:'exact' }).order('updated_at', { ascending:false }).limit(1);
+            if(error) return false;
+            const sig = (count==null?'':count)+'|'+((data && data[0] && data[0].updated_at)||'');
+            EX._psig = EX._psig || {};
+            if(EX._psig[name]===sig) return false;
+            EX._psig[name] = sig; load(0); return true;
+          }catch(e){ return false; }
+        };
         load();
         try{
           sb.channel('rt_'+name)
-            .on('postgres_changes', { event:'*', schema:'public', table:name }, load)
+            .on('postgres_changes', { event:'*', schema:'public', table:name }, ()=> load(0))
             .subscribe();
         }catch(e){ console.warn('realtime subscribe failed for', name, e); }
       },
@@ -6468,9 +6480,17 @@ EX.pollNow = function(cols){
   (cols || Object.keys(EX._reload)).forEach(c=>{ try{ if(EX._reload[c]) EX._reload[c](); }catch(e){} });
 };
 setInterval(()=>{ if(!document.hidden && EX.session.mode) EX.pollNow(EX.POLL_FAST); }, 30000);
+// Fast lane: tasks, content and notifications are checked every 4 s (a tiny request each); a full reload only happens when something really changed.
+EX.PROBE_FAST = ['tasks','notifications','content'];
+EX.probeNow = function(cols){
+  if(!EX._probe || !EX.session.mode || (EX.session.mode!=='staff')) return;
+  (cols || EX.PROBE_FAST).forEach(c=>{ try{ if(EX._probe[c]) EX._probe[c](); }catch(e){} });
+};
+EX._probeTick = 0;
+setInterval(()=>{ EX._probeTick++; if(document.hidden && EX._probeTick%8!==0) return; EX.probeNow(); }, 4000);
 setInterval(()=>{ if(!document.hidden && EX.session.mode) EX.pollNow(); }, 120000);
-document.addEventListener('visibilitychange', ()=>{ if(!document.hidden && EX.session.mode) EX.pollNow(); });
-window.addEventListener('focus', ()=>{ if(EX.session.mode) EX.pollNow(); });
+document.addEventListener('visibilitychange', ()=>{ if(!document.hidden && EX.session.mode){ EX.pollNow(); EX.probeNow(); } });
+window.addEventListener('focus', ()=>{ if(EX.session.mode){ EX.pollNow(); EX.probeNow(); } });
 
 /* ---- background scheduler for the automatic EOD snapshot ---- */
 setInterval(()=>{ try{ EX.autoEodSweep(); }catch(e){} }, 60000);
