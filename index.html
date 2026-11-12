@@ -189,6 +189,7 @@ EX.NAV = [
    {key:'dashboard', label:'Command Center', icon:'grid', roles:'*'},
    {key:'search', label:'Global Search', icon:'search', roles:['super_admin','ops_head','hr','accounts','creative_head','sales_exec','dme','graphic_designer','video_editor','videographer','outsourced_editor']},
    {key:'notifications', label:'Notifications', icon:'bell', roles:'*'},
+   {key:'syncstatus', label:'Sync check', icon:'refresh', roles:'*'},
  ]},
  {group:'Sales', items:[
    {key:'crm', label:'Sales CRM', icon:'target', roles:['super_admin','ops_head','sales_exec']},
@@ -425,7 +426,18 @@ EX.makeSupabaseDb = function(sb){
         async function load(attempt){
           attempt = attempt || 0;
           const t0 = EX._nowMs();
-          const { data, error } = await sb.from(name).select('id,data,created_at,updated_at').order('created_at', { ascending: true });
+          // The database hands back at most ~1000 rows per request (Supabase default). A plain select therefore silently cuts a long table
+          // off at its OLDEST 1000 rows - the newest records (e.g. a task just assigned) would never reach the screen. So read in pages
+          // until everything the database says it holds has arrived.
+          let data = [], error = null, total = null, from = 0;
+          for(let guard=0; guard<200; guard++){
+            const r = await sb.from(name).select('id,data,created_at,updated_at', { count:'exact' }).order('created_at', { ascending: true }).order('id', { ascending: true }).range(from, from+999);
+            if(r.error){ error = r.error; break; }
+            const rows = r.data || []; data = data.concat(rows); from += rows.length;
+            if(total===null && typeof r.count==='number') total = r.count;
+            if(!rows.length || total===null || data.length >= total) break;
+          }
+          EX._dbCount = EX._dbCount || {}; if(!error) EX._dbCount[name] = {db: total===null? data.length : total, loaded: data.length, at: Date.now()};
           if(!error && (EX._wdone[name]||0) > t0 && (load._stale = (load._stale||0)+1) <= 6){ setTimeout(()=> load(0), 250); return; }   // stale: a write finished while this read was in flight
           load._stale = 0;
           if(error){
@@ -6689,6 +6701,27 @@ EX.updateProfitEngine = function(){
 };
 
 /* ================= INTEGRATIONS ================= */
+/* ---- Sync check: shows what the database holds versus what this screen has loaded (for tracing "I can't see my task") ---- */
+EX.syncCheckNow = async function(){ EX.toast('Checking…','neutral'); try{ await EX.refreshAll(); }catch(e){} setTimeout(()=>EX.scheduleRender(), 1200); };
+EX.views['syncstatus'] = function(){
+  const me = EX.currentEmployee(); const em = (EX.authEmail||'').toLowerCase();
+  const same = em? EX.get('employees').filter(e=>(e.email||'').trim().toLowerCase()===em) : [];
+  const names = {tasks:'Tasks',content:'Content',notifications:'Notifications',employees:'Team',clients:'Clients',meetings:'Meetings',attendance:'Attendance',leads:'Leads',invoices:'Invoices',auditLog:'Activity log'};
+  const rows = Object.keys(names).map(k=>{ const c = (EX._dbCount||{})[k]; const loaded = EX.get(k).length; const db = c? c.db : null;
+    const ok = db===null? null : loaded>=db;
+    return `<tr><td>${names[k]}</td><td class="tnum">${db===null?'…':db}</td><td class="tnum">${loaded}</td><td>${ok===null?'<span style="color:var(--ex-ink-soft)">checking</span>':(ok?'<span style="color:var(--ex-good)">OK</span>':'<span style="color:var(--ex-bad)">'+(db-loaded)+' missing</span>')}</td><td class="text-xs" style="color:var(--ex-ink-soft)">${c? Math.max(0,Math.round((Date.now()-c.at)/1000))+' s ago' : '—'}</td></tr>`; }).join('');
+  const mine = me? EX.get('tasks').filter(t=>t.assignedTo===me.id) : [];
+  const created = me? EX.get('tasks').filter(t=>t._createdBy===me.id) : [];
+  return `${EX.pageHead('Sync check','Is this screen up to date with the database?',`<button id="syncCheckBtn" onclick="EX.syncCheckNow()" class="ex-btn ex-btn-primary">Check now</button>`)}
+  <div class="ex-card p-4 mb-4 text-sm space-y-1" id="syncWho">
+    <div><span class="ex-label">Signed in as</span> <b>${me?EX.esc(me.name):'—'}</b> · ${EX.esc(EX.authEmail||'—')} · role: ${EX.esc(me?me.role:'—')}</div>
+    <div><span class="ex-label">Your profile id</span> <span class="tnum">${me?EX.esc(me.id):'—'}</span>${same.length>1?` <span style="color:var(--ex-bad)">· ${same.length} profiles use this email (duplicate) — ask admin to merge</span>`:''}</div>
+    <div><span class="ex-label">Tasks assigned to you</span> <b id="syncMine">${mine.length}</b> (${mine.filter(t=>t.status!=='Done').length} open) · <span class="ex-label">created by you</span> <b>${created.length}</b></div>
+    <div><span class="ex-label">Last live check</span> ${EX._psig? 'running (every 4 s)' : 'starting…'}</div>
+  </div>
+  <div class="ex-card overflow-x-auto"><table class="ex-table"><thead><tr><th>List</th><th>In database</th><th>Loaded here</th><th>Status</th><th>Checked</th></tr></thead><tbody>${rows}</tbody></table></div>
+  <div class="text-xs mt-3" style="color:var(--ex-ink-soft)">"Missing" means the database has records this screen has not received. If you see it, press Check now and tell your admin.</div>`;
+};
 EX.views['integrations'] = function(){
   const items = [
     {name:'Claude AI (analysis, drafting, advisor)', status:'Connected', note:'Powers AI Sales Assistant, prospect analysis, proposal drafting and the Business Advisor.'},
