@@ -9,7 +9,7 @@
 <script src="https://cdn.tailwindcss.com"></script>
 <!-- Supabase JS SDK — provides window.supabase.createClient(...), used by the EX.makeSupabaseDb/
      EX.makeSupabaseStorage adapters further down to replace the claude.ai-only db/assets capabilities. -->
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.119.0/dist/umd/supabase.js"></script>
 <!-- Your own Supabase project URL/anon key + feature flags — see config.js and the README. -->
 <script src="config.js"></script>
 <style>
@@ -432,7 +432,13 @@ EX.makeSupabaseDb = function(sb){
           let data = [], error = null, total = null, from = 0;
           for(let guard=0; guard<200; guard++){
             const r = await sb.from(name).select('id,data,created_at,updated_at', { count:'exact' }).order('created_at', { ascending: true }).order('id', { ascending: true }).range(from, from+999);
-            if(r.error){ error = r.error; break; }
+            if(r.error){
+              if(from===0 && !EX._noPaging){   // this database/gateway refused the paged read: fall back to the plain read (as before paging existed)
+                const r2 = await sb.from(name).select('id,data,created_at,updated_at').order('created_at', { ascending: true });
+                if(!r2.error){ EX._noPaging = true; data = r2.data || []; total = data.length; break; }
+              }
+              error = r.error; break;
+            }
             const rows = r.data || []; data = data.concat(rows); from += rows.length;
             if(total===null && typeof r.count==='number') total = r.count;
             if(!rows.length || total===null || data.length >= total) break;
@@ -442,6 +448,8 @@ EX.makeSupabaseDb = function(sb){
           load._stale = 0;
           if(error){
             if(attempt < 4){ setTimeout(()=> load(attempt+1), 1000 * Math.pow(2, attempt)); return; }
+            EX._dbErr = { name, message: (error && (error.message || error.code)) || 'unknown error', at: Date.now() };
+            EX.scheduleRender();
             onError && onError(EX.mapSupabaseError(error)); return;
           }
           onNext({ docs: (data||[]).map(r => ({ id: r.id, data: () => Object.assign({}, r.data, {
@@ -1202,8 +1210,17 @@ EX.exitPortalPreview = function(){
 EX.renderSignIn = function(){
   const emps = EX.get('employees');
   if((!EX.dbReady || !EX.workspaceStatusDone) && !EX.dbOffline){
-    return `<div class="min-h-screen flex items-center justify-center"><div class="text-center">
-      ${EX.spinner()}<div class="mt-3 text-sm" style="color:var(--ex-ink-soft)">Connecting to Engage X workspace…</div></div></div>`;
+    EX._connectT0 = EX._connectT0 || Date.now();
+    const slow = (Date.now() - EX._connectT0 > 12000) || !!EX._dbErr;
+    if(!EX._connectTimer){ EX._connectTimer = setTimeout(()=>EX.scheduleRender(), 12500); }
+    return `<div class="min-h-screen flex items-center justify-center p-6"><div class="text-center max-w-md">
+      ${EX.spinner()}<div class="mt-3 text-sm" style="color:var(--ex-ink-soft)">Connecting to Engage X workspace…</div>
+      ${slow?`<div id="connectHelp" class="ex-card p-4 mt-5 text-left text-sm">
+        <div class="font-semibold mb-1">This is taking longer than usual</div>
+        <div style="color:var(--ex-ink-soft)">The app could not get an answer from the database${EX._dbErr?` (it said: <b>${EX.esc(String(EX._dbErr.message).slice(0,160))}</b>)`:''}. Please check:</div>
+        <ul class="list-disc pl-5 mt-2 space-y-1" style="color:var(--ex-ink-soft)"><li>Your internet connection.</li><li>Supabase: free projects <b>pause after about a week without use</b>. Open supabase.com → your project → press <b>Restore project</b> if you see it paused.</li><li>Then press the button below.</li></ul>
+        <button onclick="location.reload()" class="ex-btn ex-btn-primary mt-3">Try again</button></div>`:''}
+    </div></div>`;
   }
   if(EX.dbOffline){
     return `<div class="min-h-screen flex items-center justify-center p-6"><div class="ex-card p-8 max-w-md text-center">
@@ -1723,7 +1740,7 @@ EX.render = function(){
     root.innerHTML = EX.renderSignIn();
     return;
   }
-  if(!EX.dbReady && !EX.dbOffline){ root.innerHTML = `<div class="min-h-screen flex items-center justify-center">${EX.spinner()}</div>`; return; }
+  if(!EX.dbReady && !EX.dbOffline){ root.innerHTML = EX.renderSignIn(); return; }
   // EX.dbReady only means SOME collection has loaded (whichever of the 23
   // answered first) — it does NOT mean 'employees' specifically has. A staff
   // session that was restored from the locally-cached ex_os_session_v1 (e.g.
