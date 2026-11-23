@@ -227,6 +227,7 @@ EX.NAV = [
  ]},
  {group:'System', items:[
    {key:'integrations', label:'Integrations', icon:'plug', roles:['super_admin']},
+   {key:'datausage', label:'Data usage', icon:'layers', roles:['super_admin','ops_head']},
    {key:'audit', label:'Audit Log', icon:'shield', roles:['super_admin']},
    {key:'settings', label:'Company Settings', icon:'settings', roles:['super_admin']},
  ]},
@@ -352,6 +353,7 @@ EX.employeesReady = false;
 EX._wdone = {};
 EX._wrote = function(col){ EX._wdone[col] = (window.performance && performance.now)? performance.now() : Date.now(); };
 EX._nowMs = ()=> (window.performance && performance.now)? performance.now() : Date.now();
+EX.CAPPED = { auditLog: 500 };   // collections that can grow without limit: only the newest rows are held on screen
 EX.COLLECTIONS = ['config','employees','leads','proposals','clients','content','tasks','invoices','payments',
   'expenses','vendors','vendorInvoices','bankAccounts','attendance','leaveRequests','wfhRequests','meetings',
   'supportTickets','notifications','videoShoots','auditLog','workRequests','companyAssets'];
@@ -423,27 +425,44 @@ EX.makeSupabaseDb = function(sb){
         // on Finishing your workspace setup" symptom in production. Retrying
         // a few times with backoff lets a transient failure recover on its
         // own instead of requiring a manual reload.
+        // ---- EGRESS-FRIENDLY SYNC -------------------------------------------------------------------------------------------------------
+        // Every full table read downloads the whole table. Doing that for every change by every person (and every few seconds) is what used
+        // up the Supabase free-plan data quota. So: read the whole table ONCE (in pages), keep it in `cache`, and afterwards only ask
+        // "has anything changed?" (one tiny request) and download just the rows that changed since the newest one we already hold.
+        const CAP = (EX.CAPPED && EX.CAPPED[name]) || 0;   // very long logs (activity log): only the newest N rows are kept on screen
+        const cache = new Map(); let lastMax = ''; let loaded = false; let busy = false, again = false, rtTimer = null;
+        const maxUpd = (rows)=> rows.reduce((m,r)=> (r.updated_at && r.updated_at > m) ? r.updated_at : m, '');
+        const emit = ()=>{
+          const rows = Array.from(cache.values()).sort((a,b)=> String(a.created_at||'').localeCompare(String(b.created_at||'')) || String(a.id).localeCompare(String(b.id)));
+          onNext({ docs: rows.map(r => ({ id: r.id, data: () => Object.assign({}, r.data, {
+            _createdAt: r.created_at ? new Date(r.created_at).getTime() : undefined,
+            _updatedAt: r.updated_at ? new Date(r.updated_at).getTime() : undefined,
+          }) })) });
+        };
         async function load(attempt){
           attempt = attempt || 0;
           const t0 = EX._nowMs();
-          // The database hands back at most ~1000 rows per request (Supabase default). A plain select therefore silently cuts a long table
-          // off at its OLDEST 1000 rows - the newest records (e.g. a task just assigned) would never reach the screen. So read in pages
-          // until everything the database says it holds has arrived.
+          // The database hands back at most ~1000 rows per request (Supabase default): read in pages until everything has arrived.
           let data = [], error = null, total = null, from = 0;
-          for(let guard=0; guard<200; guard++){
-            const r = await sb.from(name).select('id,data,created_at,updated_at', { count:'exact' }).order('created_at', { ascending: true }).order('id', { ascending: true }).range(from, from+999);
-            if(r.error){
-              if(from===0 && !EX._noPaging){   // this database/gateway refused the paged read: fall back to the plain read (as before paging existed)
-                const r2 = await sb.from(name).select('id,data,created_at,updated_at').order('created_at', { ascending: true });
-                if(!r2.error){ EX._noPaging = true; data = r2.data || []; total = data.length; break; }
+          if(CAP){
+            const r = await sb.from(name).select('id,data,created_at,updated_at', { count:'exact' }).order('created_at', { ascending:false }).limit(CAP);
+            if(r.error) error = r.error; else { data = r.data || []; total = typeof r.count==='number' ? r.count : data.length; }
+          } else {
+            for(let guard=0; guard<200; guard++){
+              const r = await sb.from(name).select('id,data,created_at,updated_at', { count:'exact' }).order('created_at', { ascending: true }).order('id', { ascending: true }).range(from, from+999);
+              if(r.error){
+                if(from===0 && !EX._noPaging){   // this database/gateway refused the paged read: fall back to the plain read (as before paging existed)
+                  const r2 = await sb.from(name).select('id,data,created_at,updated_at').order('created_at', { ascending: true });
+                  if(!r2.error){ EX._noPaging = true; data = r2.data || []; total = data.length; break; }
+                }
+                error = r.error; break;
               }
-              error = r.error; break;
+              const rows = r.data || []; data = data.concat(rows); from += rows.length;
+              if(total===null && typeof r.count==='number') total = r.count;
+              if(!rows.length || total===null || data.length >= total) break;
             }
-            const rows = r.data || []; data = data.concat(rows); from += rows.length;
-            if(total===null && typeof r.count==='number') total = r.count;
-            if(!rows.length || total===null || data.length >= total) break;
           }
-          EX._dbCount = EX._dbCount || {}; if(!error) EX._dbCount[name] = {db: total===null? data.length : total, loaded: data.length, at: Date.now()};
+          EX._dbCount = EX._dbCount || {}; if(!error) EX._dbCount[name] = {db: CAP? data.length : (total===null? data.length : total), loaded: data.length, at: Date.now(), capped: CAP? total : 0};
           if(!error && (EX._wdone[name]||0) > t0 && (load._stale = (load._stale||0)+1) <= 6){ setTimeout(()=> load(0), 250); return; }   // stale: a write finished while this read was in flight
           load._stale = 0;
           if(error){
@@ -452,28 +471,63 @@ EX.makeSupabaseDb = function(sb){
             EX.scheduleRender();
             onError && onError(EX.mapSupabaseError(error)); return;
           }
-          onNext({ docs: (data||[]).map(r => ({ id: r.id, data: () => Object.assign({}, r.data, {
-            _createdAt: r.created_at ? new Date(r.created_at).getTime() : undefined,
-            _updatedAt: r.updated_at ? new Date(r.updated_at).getTime() : undefined,
-          }) })) });
+          cache.clear(); data.forEach(r=> cache.set(r.id, r)); lastMax = maxUpd(data); loaded = true;
+          EX._psig = EX._psig || {}; EX._psig[name] = (total===null? data.length : total)+'|'+lastMax;
+          EX.dbPulls = (EX.dbPulls||0) + 1;
+          emit();
         }
-        (EX._reload = EX._reload || {})[name] = ()=> load(0);
-        // Cheap "has anything changed?" check (one tiny request: row count + newest change time). Used every few seconds so that
-        // work assigned by someone else shows up almost immediately even when the database's realtime push is not switched on / is blocked.
-        (EX._probe = EX._probe || {})[name] = async ()=>{
+        // "Has anything changed?" -> download only what changed. Returns true when something new arrived.
+        async function sync(){
+          if(!loaded) return false;
+          if(busy){ again = true; return false; }
+          busy = true;
           try{
-            const { data, count, error } = await sb.from(name).select('updated_at', { count:'exact' }).order('updated_at', { ascending:false }).limit(1);
-            if(error) return false;
-            const sig = (count==null?'':count)+'|'+((data && data[0] && data[0].updated_at)||'');
-            EX._psig = EX._psig || {};
+            const t0 = EX._nowMs();
+            const pr = await sb.from(name).select('updated_at', { count:'exact' }).order('updated_at', { ascending:false }).limit(1);
+            if(pr.error) return false;
+            const count = pr.count; const max = (pr.data && pr.data[0] && pr.data[0].updated_at) || '';
+            const sig = (count==null?'':count)+'|'+max;
             if(EX._psig[name]===sig) return false;
-            EX._psig[name] = sig; load(0); return true;
+            if(!lastMax){ await load(0); return true; }              // nothing to compare with yet (e.g. first read was before sign-in): read everything
+            const dr = await sb.from(name).select('id,data,created_at,updated_at').gte('updated_at', lastMax).order('updated_at', { ascending:true }).range(0, 999);
+            if(dr.error || (dr.data||[]).length >= 1000){ await load(0); return true; }
+            if((EX._wdone[name]||0) > t0){ again = true; return false; }   // one of our own writes finished meanwhile: read again
+            const rows = dr.data || [];
+            rows.forEach(r=> cache.set(r.id, r)); const m = maxUpd(rows); if(m > lastMax) lastMax = m;
+            if(!CAP && typeof count==='number' && cache.size !== count){ await load(0); return true; }   // something was removed (or missed): one full re-read
+            EX._psig[name] = sig; EX.dbDeltas = (EX.dbDeltas||0) + 1;
+            emit(); return true;
           }catch(e){ return false; }
-        };
+          finally{ busy = false; if(again){ again = false; setTimeout(sync, 300); } }
+        }
+        // Rare safety sweep: re-checks the last 15 minutes of changes (catches a computer with a wrong clock) and the row count. Tiny.
+        async function sweep(){
+          if(!loaded || busy) return false;
+          if(!lastMax){ await load(0); return true; }
+          busy = true;
+          try{
+            const t0 = EX._nowMs();
+            const since = new Date(Math.max(0, Date.parse(lastMax) - 15*60000)).toISOString();
+            const dr = await sb.from(name).select('id,data,created_at,updated_at', { count:'exact' }).gte('updated_at', since).order('updated_at', { ascending:true }).range(0, 999);
+            if(dr.error || (dr.data||[]).length >= 1000){ busy = false; await load(0); return true; }
+            if((EX._wdone[name]||0) > t0) return false;
+            const rows = dr.data || []; let changed = false;
+            rows.forEach(r=>{ const o = cache.get(r.id); if(!o || o.updated_at!==r.updated_at){ changed = true; } cache.set(r.id, r); });
+            const m = maxUpd(rows); if(m > lastMax) lastMax = m;
+            if(!CAP && typeof dr.count==='number'){ /* count here is of the window only; compare via the cheap probe instead */ }
+            if(changed){ emit(); return true; }
+            return false;
+          }catch(e){ return false; }
+          finally{ busy = false; }
+        }
+        (EX._reload = EX._reload || {})[name] = ()=> sync();
+        (EX._sweep = EX._sweep || {})[name] = ()=> sweep();
+        (EX._reloadFull = EX._reloadFull || {})[name] = ()=> load(0);
+        (EX._probe = EX._probe || {})[name] = ()=> sync();
         load();
         try{
           sb.channel('rt_'+name)
-            .on('postgres_changes', { event:'*', schema:'public', table:name }, ()=> load(0))
+            .on('postgres_changes', { event:'*', schema:'public', table:name }, ()=>{ clearTimeout(rtTimer); rtTimer = setTimeout(sync, 400); })
             .subscribe();
         }catch(e){ console.warn('realtime subscribe failed for', name, e); }
       },
@@ -587,7 +641,7 @@ EX.initDb = async function(){
     EX.dbOffline = true; EX.scheduleRender(); return;
   }
   try{
-    EX.sb = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY);
+    EX.sb = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY, { global: { fetch: EX.meteredFetch } });
     EX.CAP.db = EX.makeSupabaseDb(EX.sb);
   }catch(e){ console.warn('Supabase init failed', e); EX.CAP.db = null; EX.sb = null; }
   if(!EX.CAP.db){ EX.dbOffline = true; EX.scheduleRender(); return; }
@@ -1673,7 +1727,7 @@ EX.shell = function(content){
     </div>`:''}
     <div class="flex-1 min-w-0 flex flex-col">
       ${EX.topbar()}
-      <div class="flex-1 p-4 lg:p-6 max-w-[1400px] w-full mx-auto">${content}</div>
+      <div class="flex-1 p-4 lg:p-6 max-w-[1400px] w-full mx-auto">${EX.usageBanner()}${content}</div>
     </div>
   </div>`;
 };
@@ -6508,18 +6562,20 @@ EX.pollNow = function(cols){
   if(!EX._reload) return;
   (cols || Object.keys(EX._reload)).forEach(c=>{ try{ if(EX._reload[c]) EX._reload[c](); }catch(e){} });
 };
-setInterval(()=>{ if(!document.hidden && EX.session.mode) EX.pollNow(EX.POLL_FAST); }, 30000);
+setInterval(()=>{ const L = EX.usageLevel(); if(L==='paused') return; EX._pollTick = (EX._pollTick||0)+1; if(L==='economy' && EX._pollTick%6!==0) return; if(!document.hidden && EX.session.mode) EX.pollNow(EX.POLL_FAST); }, 30000);
 // Fast lane: tasks, content and notifications are checked every 4 s (a tiny request each); a full reload only happens when something really changed.
 EX.PROBE_FAST = ['tasks','notifications','content'];
+// Safety net for the rare edit the quick check could miss (e.g. a computer with a wrong clock): one full re-read every 20 minutes.
+setInterval(()=>{ if(!document.hidden && EX.session.mode==='staff' && EX._sweep && EX.usageLevel()!=='paused') Object.keys(EX._sweep).forEach((c,i)=>{ setTimeout(()=>{ try{ EX._sweep[c](); }catch(e){} }, i*1500); }); }, 10*60000);
 EX.probeNow = function(cols){
   if(!EX._probe || !EX.session.mode || (EX.session.mode!=='staff')) return;
   (cols || EX.PROBE_FAST).forEach(c=>{ try{ if(EX._probe[c]) EX._probe[c](); }catch(e){} });
 };
 EX._probeTick = 0;
-setInterval(()=>{ EX._probeTick++; if(document.hidden && EX._probeTick%8!==0) return; EX.probeNow(); }, 4000);
-setInterval(()=>{ if(!document.hidden && EX.session.mode) EX.pollNow(); }, 120000);
-document.addEventListener('visibilitychange', ()=>{ if(!document.hidden && EX.session.mode){ EX.pollNow(); EX.probeNow(); } });
-window.addEventListener('focus', ()=>{ if(EX.session.mode){ EX.pollNow(); EX.probeNow(); } });
+setInterval(()=>{ EX._probeTick++; const L = EX.usageLevel(); if(L==='paused') return; if(L==='economy' && EX._probeTick%5!==0) return; if(document.hidden && EX._probeTick%8!==0) return; EX.probeNow(); }, 4000);
+setInterval(()=>{ if(EX.usageLevel()==='paused') return; if(!document.hidden && EX.session.mode) EX.pollNow(); }, 120000);
+document.addEventListener('visibilitychange', ()=>{ if(!document.hidden && EX.session.mode && EX.usageLevel()!=='paused'){ EX.pollNow(); EX.probeNow(); } });
+window.addEventListener('focus', ()=>{ if(EX.session.mode && EX.usageLevel()!=='paused'){ EX.pollNow(); EX.probeNow(); } });
 
 /* ---- background scheduler for the automatic EOD snapshot ---- */
 setInterval(()=>{ try{ EX.autoEodSweep(); }catch(e){} }, 60000);
@@ -6738,6 +6794,111 @@ EX.views['syncstatus'] = function(){
   </div>
   <div class="ex-card overflow-x-auto"><table class="ex-table"><thead><tr><th>List</th><th>In database</th><th>Loaded here</th><th>Status</th><th>Checked</th></tr></thead><tbody>${rows}</tbody></table></div>
   <div class="text-xs mt-3" style="color:var(--ex-ink-soft)">"Missing" means the database has records this screen has not received. If you see it, press Check now and tell your admin.</div>`;
+};
+/* ================= DATA-USAGE GUARD =================
+   The Supabase FREE plan allows 5 GB of downloads a month; going over switches the whole database off until the next month.
+   This block (1) MEASURES what every browser downloads, (2) shares a small total through the database, (3) SLOWS the app down automatically
+   (data-saving mode, then pause) long before the limit, and (4) WARNS admins with a clear page + notifications.
+   Numbers are estimates (the real meter is on supabase.com -> Organization -> Usage) - the limits below are deliberately cautious. */
+EX.EGRESS_LIMIT = 5 * 1024 * 1024 * 1024;          // free plan allowance per month
+EX.USAGE_SAVE_AT = 0.60;                           // organisation total at/above this share  -> data-saving mode for everyone
+EX.USAGE_PAUSE_AT = 0.85;                          // ... at/above this share -> automatic refresh paused (manual "Refresh now" only)
+EX.USAGE_DAY_SAVE = 80 * 1024 * 1024;              // one browser, one day: unusually heavy -> data-saving mode on that browser
+EX.USAGE_DAY_PAUSE = 250 * 1024 * 1024;            // ... runaway -> pause on that browser
+EX.usage = (function(){
+  const KEY = 'ex_usage_v1'; let u = null;
+  const mk = ()=>{ const d = new Date(); return {day:EX.todayKey? EX.todayKey() : d.toISOString().slice(0,10), month:d.toISOString().slice(0,7), dayBytes:0, monthBytes:0, reqs:0, dev:'d'+Math.random().toString(36).slice(2,8), lastReport:0}; };
+  try{ u = JSON.parse(localStorage.getItem(KEY)||'null'); }catch(e){ u = null; }
+  if(!u || typeof u!=='object') u = mk();
+  if(!u.dev) u.dev = 'd'+Math.random().toString(36).slice(2,8);
+  let saveT = null; const save = ()=>{ if(saveT) return; saveT = setTimeout(()=>{ saveT = null; try{ localStorage.setItem(KEY, JSON.stringify(u)); }catch(e){} }, 3000); };
+  return {
+    get(){ const t = new Date().toISOString(); const day = t.slice(0,10), month = t.slice(0,7); if(u.day!==day){ u.day = day; u.dayBytes = 0; } if(u.month!==month){ u.month = month; u.monthBytes = 0; u.reqs = 0; } return u; },
+    add(b){ const x = this.get(); x.dayBytes += b; x.monthBytes += b; x.reqs++; save(); },
+  };
+})();
+// every request to the database goes through here so its size is counted (content-length when present, otherwise ~30% of the unpacked size = what is sent after compression)
+EX.meteredFetch = function(input, init){
+  return fetch(input, init).then(res=>{
+    try{
+      const cl = Number(res.headers.get('content-length'));
+      if(cl>0) EX.usage.add(cl);
+      else res.clone().arrayBuffer().then(b=>EX.usage.add(Math.round(b.byteLength*0.3)+300)).catch(()=>{});
+    }catch(e){}
+    return res;
+  });
+};
+EX.usageMonthRows = function(){
+  const m = new Date().toISOString().slice(0,7);
+  return EX.get('config').filter(d=>d.kind==='usageMeter' && d.month===m);
+};
+// organisation-wide estimate for this month = every device's last report (this browser counted live)
+EX.usageSummary = function(){
+  const me = EX.usage.get(); const rows = EX.usageMonthRows().filter(r=>r.dev!==me.dev);
+  const total = rows.reduce((a,r)=>a+(Number(r.bytes)||0),0) + me.monthBytes;
+  return {total, pct: total/EX.EGRESS_LIMIT, rows, me};
+};
+EX.usageLevel = function(){
+  try{
+    if(!EX.session || EX.session.mode!=='staff') return 'normal';
+    if(EX._usageForce) return EX._usageForce;
+    const me = EX.usage.get(); const org = EX._usageOrgPct||0;
+    if(me.dayBytes >= EX.USAGE_DAY_PAUSE || org >= EX.USAGE_PAUSE_AT) return 'paused';
+    if(me.dayBytes >= EX.USAGE_DAY_SAVE || org >= EX.USAGE_SAVE_AT) return 'economy';
+  }catch(e){}
+  return 'normal';
+};
+EX.usageRefreshOrg = function(){ try{ EX._usageOrgPct = EX.usageSummary().pct; }catch(e){} };
+EX.usageReport = async function(){
+  try{
+    const emp = EX.currentEmployee && EX.currentEmployee(); if(!emp || !EX.CAP.db) return;
+    const me = EX.usage.get(); if(me.monthBytes===me.lastReport && me.lastReport>0) return;
+    await EX.CAP.db.collection('config').doc('usage_'+me.dev).set({kind:'usageMeter', employeeId:emp.id, employeeName:emp.name, dev:me.dev, month:me.month, bytes:me.monthBytes, reqs:me.reqs, dayBytes:me.dayBytes, day:me.day, at:Date.now(), _updatedAt:Date.now()});
+    EX._wrote('config'); me.lastReport = me.monthBytes;
+    try{ localStorage.setItem('ex_usage_v1', JSON.stringify(me)); }catch(e){}
+  }catch(e){}
+};
+// one notification per threshold per month, to the admins
+EX.usageAlertCheck = async function(){
+  try{
+    if(!['super_admin','ops_head'].includes(EX.currentRole())) return;
+    const s = EX.usageSummary(); const m = new Date().toISOString().slice(0,7);
+    for(const t of [0.5,0.8,0.95]){
+      if(s.pct < t) continue;
+      const id = 'usageflag_'+m+'_'+Math.round(t*100);
+      if(EX.get('config').some(d=>d.id===id)) continue;
+      await EX.CAP.db.collection('config').doc(id).set({kind:'usageFlag', month:m, level:t, _updatedAt:Date.now()}); EX._wrote('config');
+      const msg = `Data usage is at ${Math.round(s.pct*100)}% of the free monthly allowance. ${t>=0.8?'The app is slowing its refresh to avoid a shutdown. ':''}Open Data usage for details.`;
+      for(const role of ['super_admin','ops_head']) await EX.addNotification({targetRole:role, message:msg, link:'datausage', kind:'update', tone:'warn'});
+    }
+  }catch(e){}
+};
+EX.usageBanner = function(){
+  const L = EX.usageLevel(); if(L==='normal') return '';
+  const admin = ['super_admin','ops_head'].includes(EX.currentRole());
+  const txt = L==='paused'
+    ? 'Automatic refresh is paused to protect the database data allowance. Press Refresh now to see the latest.'
+    : 'Data-saving mode: new changes may take up to a minute to appear.';
+  return `<div id="usageBanner" class="rounded-xl p-3 mb-3 text-sm flex flex-wrap items-center justify-between gap-2" style="background:var(--ex-warn-bg);color:var(--ex-warn)"><span>${txt}${admin?` <a href="#/datausage" class="underline font-medium">Data usage</a>`:''}</span><button onclick="EX.usageRefreshNow()" class="ex-btn ex-btn-ghost ex-btn-sm">Refresh now</button></div>`;
+};
+EX.usageRefreshNow = async function(){ EX.toast('Refreshing…','neutral'); try{ await Promise.all(Object.keys(EX._reload||{}).map(k=>EX._reload[k]())); }catch(e){} EX.scheduleRender(); };
+setInterval(()=>{ if(EX.session && EX.session.mode==='staff' && EX.employeesReady){ EX.usageReport(); EX.usageRefreshOrg(); EX.usageAlertCheck(); } }, 10*60000);
+setTimeout(()=>{ if(EX.session && EX.session.mode==='staff'){ EX.usageRefreshOrg(); } }, 20000);
+EX.fmtBytes = (b)=> b>=1073741824? (b/1073741824).toFixed(2)+' GB' : b>=1048576? (b/1048576).toFixed(1)+' MB' : Math.round(b/1024)+' KB';
+EX.views['datausage'] = function(){
+  const s = EX.usageSummary(); const pct = Math.min(100, Math.round(s.pct*100)); const L = EX.usageLevel();
+  const tone = s.pct>=EX.USAGE_PAUSE_AT ? 'var(--ex-bad)' : s.pct>=EX.USAGE_SAVE_AT ? 'var(--ex-warn)' : 'var(--ex-good)';
+  const status = s.pct>=EX.USAGE_PAUSE_AT ? 'Danger - automatic refresh is paused' : s.pct>=EX.USAGE_SAVE_AT ? 'Watch - data-saving mode is on' : 'Healthy';
+  const all = s.rows.concat([{employeeName:((EX.currentEmployee()||{}).name||'This browser')+' (this browser)', bytes:s.me.monthBytes, dayBytes:s.me.dayBytes, reqs:s.me.reqs, at:Date.now()}]).sort((a,b)=>(b.bytes||0)-(a.bytes||0));
+  return `${EX.pageHead('Data usage','How much of the free database allowance this month has been used (estimate)',`<button onclick="EX.usageRefreshOrg();EX.scheduleRender()" class="ex-btn ex-btn-ghost">Recalculate</button>`)}
+  <div class="ex-card p-5 mb-4" id="usageCard">
+    <div class="flex flex-wrap items-end justify-between gap-2"><div><div class="ex-label">This month (estimate)</div><div class="font-display text-2xl font-bold tnum" id="usageTotal">${EX.fmtBytes(s.total)} <span class="text-base font-normal" style="color:var(--ex-ink-soft)">of ${EX.fmtBytes(EX.EGRESS_LIMIT)} (${Math.round(s.pct*100)}%)</span></div></div><div class="font-semibold" style="color:${tone}" id="usageStatus">${status}</div></div>
+    <div class="mt-3 h-3 rounded-full overflow-hidden" style="background:var(--ex-line)"><div style="width:${pct}%;height:100%;background:${tone}"></div></div>
+    <div class="text-xs mt-3" style="color:var(--ex-ink-soft)">What happens automatically: at ${Math.round(EX.USAGE_SAVE_AT*100)}% the app switches to data-saving mode (updates every ~minute instead of every few seconds); at ${Math.round(EX.USAGE_PAUSE_AT*100)}% automatic refresh pauses (people press "Refresh now"); admins get a notification at 50%, 80% and 95%. Supabase's own meter is the final word: <a class="underline" href="https://supabase.com/dashboard/org" target="_blank" rel="noopener">supabase.com → your organization → Usage</a>.</div>
+  </div>
+  <div class="ex-card overflow-x-auto"><table class="ex-table"><thead><tr><th>Person / device</th><th>This month</th><th>Today</th><th>Requests</th><th>Last report</th></tr></thead><tbody>
+  ${all.map(r=>`<tr><td>${EX.esc(r.employeeName||'—')}</td><td class="tnum">${EX.fmtBytes(r.bytes||0)}</td><td class="tnum">${EX.fmtBytes(r.dayBytes||0)}</td><td class="tnum">${r.reqs||0}</td><td class="text-xs" style="color:var(--ex-ink-soft)">${r.at? Math.max(0,Math.round((Date.now()-r.at)/60000))+' min ago':'—'}</td></tr>`).join('')}</tbody></table></div>
+  <div class="text-xs mt-3" style="color:var(--ex-ink-soft)">This browser right now: <b>${L==='normal'?'normal speed':L==='economy'?'data-saving mode':'automatic refresh paused'}</b>. Each person's browser reports its own total about every 10 minutes.</div>`;
 };
 EX.views['integrations'] = function(){
   const items = [
